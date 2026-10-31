@@ -416,16 +416,127 @@ enum Telemetry {
         guard enabled, !token.isEmpty else { return }
         let day = ISO8601DateFormatter.string(from: Date(), timeZone: .gmt, formatOptions: [.withFullDate])
         let dedupe = "sent-" + (key ?? event)
-        guard store.string(forKey: dedupe) != day,
-              let body = try? JSONSerialization.data(withJSONObject: payload(event: event, extra: extra)) else { return }
+        guard store.string(forKey: dedupe) != day else { return }
+        post(payload(event: event, extra: extra)) { store.set(day, forKey: dedupe) }
+    }
+
+    /// A crash from a previous run, as a PostHog Error Tracking `$exception`. Only the crash
+    /// type, signal and BudsDeck's own function names are sent (no file paths, no memory).
+    static func captureCrash(_ c: CrashReporter.Crash) {
+        guard enabled, !token.isEmpty else { return }
+        let frames: [[String: Any]] = c.frames.map {
+            ["platform": "custom", "lang": "swift", "function": $0, "resolved": true, "in_app": true]
+        }
+        let exc: [String: Any] = [
+            "type": c.type, "value": c.reason.isEmpty ? c.type : c.reason,
+            "mechanism": ["handled": false, "synthetic": false, "type": "crash"],
+            "stacktrace": ["type": "raw", "frames": frames],  // PostHog resolves raw frames itself
+        ]
+        post(payload(event: "$exception", extra: [
+            "$exception_list": [exc],
+            "$exception_fingerprint": ([c.type] + c.frames.prefix(3)).joined(separator: "|"),
+            "$issue_name": "\(c.type) in \(c.frames.first ?? "BudsDeck")",
+            "crashed_app_version": c.appVersion,
+        ]))
+    }
+
+    private static func post(_ payload: [String: Any], onSuccess: @escaping () -> Void = {}) {
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
         var req = URLRequest(url: URL(string: host + "/i/v0/e/")!)
         req.httpMethod = "POST"; req.httpBody = body
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         URLSession.shared.dataTask(with: req) { _, resp, _ in
             if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                DispatchQueue.main.async { store.set(day, forKey: dedupe) }
+                DispatchQueue.main.async(execute: onSuccess)
             }
         }.resume()
+    }
+}
+
+// MARK: - Crash reports
+
+/// macOS writes crash reports to ~/Library/Logs/DiagnosticReports and keeps them local.
+/// On launch, BudsDeck reads its own new ones (BudsDeck-*.ips) and extracts a summary.
+enum CrashReporter {
+    struct Crash { var type: String; var reason: String; var frames: [String]; var appVersion: String; var date: Date }
+
+    static var store = UserDefaults.standard
+    static var directory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/DiagnosticReports")
+
+    /// .ips = one JSON header line, then a JSON body. Keeps only BudsDeck's own frames.
+    static func parse(_ text: String, date: Date) -> Crash? {
+        guard let nl = text.firstIndex(of: "\n"),
+              let body = try? JSONSerialization.jsonObject(with: Data(text[text.index(after: nl)...].utf8)) as? [String: Any]
+        else { return nil }
+        let header = (try? JSONSerialization.jsonObject(with: Data(text[..<nl].utf8))) as? [String: Any]
+        let exc = body["exception"] as? [String: Any]
+        let term = (body["termination"] as? [String: Any])?["indicator"] as? String
+        let images = (body["usedImages"] as? [[String: Any]]) ?? []
+        let ours = Set(images.indices.filter { (images[$0]["name"] as? String) == "BudsDeck" })
+        let threads = (body["threads"] as? [[String: Any]]) ?? []
+        let faulting = body["faultingThread"] as? Int ?? 0
+        let frames = (faulting < threads.count ? threads[faulting]["frames"] as? [[String: Any]] : nil) ?? []
+        let symbols = frames.compactMap { f -> String? in
+            guard let i = f["imageIndex"] as? Int, ours.contains(i), let sym = f["symbol"] as? String else { return nil }
+            let clean = sanitize(sym)
+            return clean.isEmpty ? nil : clean
+        }
+        return Crash(type: exc?["type"] as? String ?? "Crash",
+                     reason: [exc?["signal"] as? String, term].compactMap { $0 }.joined(separator: " · "),
+                     frames: Array(symbols.prefix(8)),
+                     appVersion: header?["app_version"] as? String ?? "?", date: date)
+    }
+
+    /// Function names only: drop any token that looks like a path (paths can contain the username).
+    static func sanitize(_ symbol: String) -> String {
+        symbol.split(separator: " ").filter { !$0.contains("/") && !$0.contains("~") }.joined(separator: " ")
+    }
+
+    /// Crash reports newer than the last check. The first run only sets the checkpoint.
+    static func newCrashes() -> [Crash] {
+        let last = store.object(forKey: "crashCheckedAt") as? Date
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        var newest = last ?? Date()
+        var found: [Crash] = []
+        for url in urls where url.lastPathComponent.hasPrefix("BudsDeck") && url.pathExtension == "ips" {
+            guard let last, let d = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+                  d > last, let text = try? String(contentsOf: url, encoding: .utf8), let c = parse(text, date: d) else { continue }
+            newest = max(newest, d); found.append(c)
+        }
+        store.set(newest, forKey: "crashCheckedAt")
+        if let c = found.max(by: { $0.date < $1.date }) { store.set(summary(c), forKey: "lastCrashSummary") }
+        return found.sorted { $0.date > $1.date }
+    }
+
+    static func summary(_ c: Crash) -> String {
+        let when = c.date.formatted(date: .abbreviated, time: .shortened)
+        return "\(c.type)\(c.reason.isEmpty ? "" : " (\(c.reason))") in BudsDeck \(c.appVersion) on \(when)"
+            + (c.frames.isEmpty ? "" : "\n" + c.frames.map { "  at \($0)" }.joined(separator: "\n"))
+    }
+}
+
+/// "Report a Problem…": a GitHub issue pre-filled with non-personal context. The user sees
+/// everything in the browser and decides whether to submit it.
+enum ProblemReport {
+    static func url(budsName: String?, productID: String?, lastFailure: String?, lastCrash: String?) -> URL {
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        let buds = budsName.map { Telemetry.modelName($0) + (productID.map { " (\($0))" } ?? "") } ?? "not connected"
+        let body = """
+        **What happened?**
+        <!-- Describe the problem. Screenshots help. -->
+
+
+        ---
+        BudsDeck \(Updater.current) · macOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)
+        Earbuds: \(buds)
+        Last connection problem: \(lastFailure ?? "none")
+        Last crash: \(lastCrash.map { "\n```\n\($0)\n```" } ?? "none")
+        """
+        var c = URLComponents(string: "https://github.com/notacp/BudsDeck/issues/new")!
+        c.queryItems = [URLQueryItem(name: "title", value: "Problem: "), URLQueryItem(name: "body", value: body)]
+        return c.url!
     }
 }
 
@@ -492,6 +603,7 @@ final class BudsModel: ObservableObject {
             objectWillChange.send()
         }
         link.onFailure = { [weak self] reason in
+            UserDefaults.standard.set(reason, forKey: "lastFailureReason")
             let buds = Telemetry.budsProps(name: self?.link.device?.name, productID: self?.link.productID)
             Telemetry.captureDaily("connect_failed", key: "connect_failed-" + reason, extra: buds.merging(["reason": reason]) { $1 })
         }
@@ -500,6 +612,7 @@ final class BudsModel: ObservableObject {
             guard let self else { return }
             link.refresh()
             Telemetry.captureDaily("app_launched")
+            for crash in CrashReporter.newCrashes().prefix(3) { Telemetry.captureCrash(crash) }
             if bluetoothDenied { Telemetry.captureDaily("connect_failed", key: "connect_failed-permission_denied", extra: ["reason": "permission_denied"]) }
             Updater.checkIfDue { [weak self] in self?.objectWillChange.send() }
         }
@@ -513,6 +626,13 @@ final class BudsModel: ObservableObject {
             }
             Updater.checkIfDue { [weak self] in self?.objectWillChange.send() }
         }
+    }
+
+    func reportProblem() {
+        NSWorkspace.shared.open(ProblemReport.url(
+            budsName: link.device?.name, productID: link.productID,
+            lastFailure: UserDefaults.standard.string(forKey: "lastFailureReason"),
+            lastCrash: UserDefaults.standard.string(forKey: "lastCrashSummary")))
     }
 
     var shareUsage: Bool {
@@ -786,6 +906,7 @@ struct Panel: View {
                     Toggle("Open at Login", isOn: Binding(get: { model.openAtLogin }, set: { model.openAtLogin = $0 }))
                     Toggle("Share Anonymous Usage Stats", isOn: Binding(get: { model.shareUsage }, set: { model.shareUsage = $0 }))
                     Divider()
+                    Button("Report a Problem…") { model.reportProblem() }
                     Button("What's Shared…") {
                         NSWorkspace.shared.open(URL(string: "https://github.com/notacp/BudsDeck#privacy")!)
                     }
@@ -907,9 +1028,26 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(reasons.allSatisfy { $0 == "no_compatible_device" })
     precondition(Updater.isNewer("0.3.1", than: "0.3.0") && Updater.isNewer("v0.10.0", than: "0.9.9"))
     precondition(!Updater.isNewer("0.3.0", than: "0.3.0") && !Updater.isNewer("0.2.9", than: "0.3"))
+    // Crash parsing keeps only BudsDeck frames and drops path-like tokens.
+    let ips = #"{"app_name":"BudsDeck","app_version":"0.3.0","bug_type":"309"}"# + "\n" + #"""
+    {"exception":{"type":"EXC_BREAKPOINT","signal":"SIGTRAP"},"termination":{"indicator":"Trace/BPT trap: 5"},
+     "faultingThread":0,"usedImages":[{"name":"libswiftCore.dylib"},{"name":"BudsDeck"}],
+     "threads":[{"frames":[{"imageIndex":0,"symbol":"swift_fatalError"},
+                           {"imageIndex":1,"symbol":"BudsLink.handle(_:_:) /Users/alex/BudsDeck.swift"},
+                           {"imageIndex":1,"symbol":"main"}]}]}
+    """#
+    let crash = CrashReporter.parse(ips, date: Date())!
+    precondition(crash.type == "EXC_BREAKPOINT" && crash.appVersion == "0.3.0")
+    precondition(crash.frames == ["BudsLink.handle(_:_:)", "main"])
+    precondition(!CrashReporter.summary(crash).contains("/Users"))
+    let report = ProblemReport.url(budsName: "Alex's OnePlus Buds 3", productID: "063C14", lastFailure: "timeout", lastCrash: nil).absoluteString
+    precondition(!report.contains("Alex") && report.contains("063C14"))
     Telemetry.enabled = false; precondition(!Telemetry.enabled)
     l.store.removePersistentDomain(forName: "budsdeck.selftest")
     print("selftest ok"); exit(0)
 }
+
+// `BudsDeck --crash-test`: crash on purpose, to exercise crash reporting end to end.
+if CommandLine.arguments.contains("--crash-test") { fatalError("BudsDeck crash test") }
 
 BudsDeckApp.main()

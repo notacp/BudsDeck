@@ -73,13 +73,14 @@ To update, `git pull` and run `./build.sh` again; it restarts the app. `./build.
 
 ## Privacy
 
-BudsDeck sends a few anonymous events so the maintainer can see roughly how many people use it, and whether it works for them. Each is sent **at most once per day**:
+BudsDeck sends a few anonymous events so the maintainer can see roughly how many people use it, and whether it works for them. Usage events go out **at most once per day**; a crash report goes out once per crash (at most 3 per launch):
 
 | Event | When | Why |
 |---|---|---|
 | `app_launched` | the app runs | count installs, including ones where the earbuds never connect |
 | `app_active` | your earbuds connect | count working installs, by model |
 | `connect_failed` | connecting fails, with a reason code (`no_compatible_device`, `permission_denied`, `timeout`, `open_failed`) | find what's broken for whom |
+| `$exception` | on launch, if BudsDeck crashed since last time | fix crashes: crash type (e.g. `EXC_BREAKPOINT`) and **BudsDeck's own function names** from the crash report only, no file paths or memory contents |
 
 | Sent | Not sent |
 |---|---|
@@ -88,6 +89,8 @@ BudsDeck sends a few anonymous events so the maintainer can see roughly how many
 | The earbuds' model, e.g. "OnePlus Buds 3", picked from a fixed list of known models (otherwise "other"), and the model code the earbuds report (e.g. `063C14`, identical for every unit of that model) | Your earbuds' Bluetooth name if you renamed them, Bluetooth addresses, settings, listening activity |
 
 Turn it off any time: gear menu in the panel → **Share Anonymous Usage Stats**. The code is in `Telemetry` in [`BudsDeck.swift`](BudsDeck.swift).
+
+**Report a Problem…** (gear menu) opens a GitHub issue pre-filled with your BudsDeck and macOS versions, earbuds model, last connection problem and last crash summary. You see all of it in your browser and choose whether to submit it.
 
 **Update check:** once a day BudsDeck asks GitHub's public API for the latest release and shows a banner when a newer version exists. That request sends nothing about you (GitHub sees an ordinary web request) and is independent of the usage-stats setting.
 
