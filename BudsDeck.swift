@@ -32,7 +32,7 @@ let ancVariants: [(bit: Int, label: String)] = [
 enum Cmd: UInt16 {
     case battery = 0x0106, noiseGet = 0x010C, noiseSet = 0x0404
     case eqGet = 0x010F, eqListGet = 0x0122, eqPresetSet = 0x0406, eqCustomSet = 0x0418
-    case wearGet = 0x0109, notify = 0x0204
+    case wearGet = 0x0109, notify = 0x0204, productGet = 0x0103
 }
 
 /// Per-bud status pairs `(idx, flags)…` (idx 1 = L, 2 = R, 3 = case) → in-ear map.
@@ -146,6 +146,11 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     var mode: Int?               // current bit index
     var eq: Int?                 // current EQ id (preset 0–3, or a custom slot id)
     var customEQs: [CustomEQ] = []
+    /// Model code the buds report (0x8103), e.g. "063C14" on OnePlus Buds 3. Same for every
+    /// unit of a model, so it identifies unknown models without anything personal.
+    var productID: String?
+    /// Reports why connecting failed (permission, no device, timeout); the model forwards it.
+    var onFailure: (String) -> Void = { _ in }
     /// The buds only report the case while docked / lid recently open, so keep the last reading.
     var store = UserDefaults.standard
     /// Keyed per device so a second pair of buds never shows the first pair's case.
@@ -166,6 +171,13 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     var selectedCustom: CustomEQ? { customEQs.first { $0.id == eq } ?? customEQs.first }
     var onChange: () -> Void = {}
 
+    /// Any paired device (connected or not) that advertises the HeyMelody service.
+    static func hasPairedCompatible() -> Bool {
+        ((IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []).contains { d in
+            ((d.services as? [IOBluetoothSDPServiceRecord]) ?? []).contains { $0.matchesUUIDArray([serviceUUID]) }
+        }
+    }
+
     /// First paired + connected device that advertises the HeyMelody service.
     static func findConnected() -> IOBluetoothDevice? {
         let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
@@ -179,26 +191,30 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     func resetState() {
         device = nil; channel = nil; opening = false; ready = false
         queue.removeAll(); rx.removeAll()
-        battery = [:]; mode = nil; eq = nil; customEQs = []; inEar = [:]; noiseNotice = nil
+        battery = [:]; mode = nil; eq = nil; customEQs = []; inEar = [:]; noiseNotice = nil; productID = nil
     }
 
     func ensureOpen() {
         if channel?.isOpen() == true || opening { return }
         ready = false
         guard let dev = deviceProvider() else {
-            resetState(); lastError = nil; onChange(); return  // the header already says "No buds connected"
+            resetState(); lastError = nil; onChange()  // the header already says "No buds connected"
+            // Not a failure if compatible buds are paired but just not connected right now.
+            if !BudsLink.hasPairedCompatible() { onFailure("no_compatible_device") }
+            return
         }
         device = dev
         let rec = (dev.services as? [IOBluetoothSDPServiceRecord])?
             .first { $0.matchesUUIDArray([BudsLink.serviceUUID]) }
         var chID: BluetoothRFCOMMChannelID = 0
         guard rec?.getRFCOMMChannelID(&chID) == kIOReturnSuccess else {
-            lastError = "No control channel"; onChange(); return
+            lastError = "No control channel"; onChange(); onFailure("no_control_channel"); return
         }
         var ch: IOBluetoothRFCOMMChannel?
         let r = dev.openRFCOMMChannelAsync(&ch, withChannelID: chID, delegate: self)
         guard r == kIOReturnSuccess, let ch else {
-            lastError = "Couldn't reach the earbuds"; channel = nil; queue.removeAll(); onChange(); return
+            lastError = "Couldn't reach the earbuds"; channel = nil; queue.removeAll(); onChange()
+            onFailure("open_failed"); return
         }
         channel = ch; opening = true
         // If the open never completes, give up so the next refresh can retry.
@@ -206,6 +222,7 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
             guard let self, self.opening, self.channel === ch else { return }
             ch.close(); self.channel = nil; self.opening = false; self.queue.removeAll()
             self.lastError = "Couldn't reach the earbuds"; self.onChange()
+            self.onFailure("timeout")
         }
     }
 
@@ -222,7 +239,7 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     /// light: just what changes often (battery, wear, mode); used while the panel is open.
     func refresh(light: Bool = false) {
         send(.battery); send(.wearGet); send(.noiseGet, [0x01, 0x01])
-        if !light { send(.eqGet); send(.eqListGet) }
+        if !light { send(.eqGet); send(.eqListGet); if productID == nil { send(.productGet) } }
     }
 
     func setPreset(_ id: Int) { send(.eqPresetSet, [UInt8(id)]); send(.eqGet) }
@@ -259,7 +276,8 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         guard ch === channel else { return }   // a superseded/timed-out attempt
         opening = false
         guard status == kIOReturnSuccess else {
-            lastError = "Couldn't reach the earbuds"; channel = nil; queue.removeAll(); onChange(); return
+            lastError = "Couldn't reach the earbuds"; channel = nil; queue.removeAll(); onChange()
+            onFailure("open_failed"); return
         }
         lastError = nil
         // The buds push a host-list notification right after open and drop
@@ -311,6 +329,8 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
             applyWear(parseWear(p[2...]))   // live wear change: [02, ?, 01, L, 02, R, …]
         case Cmd.eqGet.rawValue | 0x8000 where p.count >= 2 && p[0] == 0:
             eq = Int(p[1])
+        case Cmd.productGet.rawValue | 0x8000 where p.count >= 4 && p[0] == 0:
+            productID = String(format: "%02X%02X%02X", p[3], p[2], p[1])
         case Cmd.eqListGet.rawValue | 0x8000:
             customEQs = parseEQList(p)
         default: break  // other notifications (e.g. 0x0204 host list) ignored
@@ -368,7 +388,15 @@ enum Telemetry {
         return knownModels.first { n.contains($0.lowercased()) } ?? "other"
     }
 
-    static func payload(budsModel: String?) -> [String: Any] {
+    /// Earbuds fields for an event: canonical model name (never the Bluetooth name) and model code.
+    static func budsProps(name: String?, productID: String?) -> [String: Any] {
+        var p: [String: Any] = [:]
+        if let name { p["buds_model"] = modelName(name) }
+        if let productID { p["product_id"] = productID }
+        return p
+    }
+
+    static func payload(event: String = "app_active", extra: [String: Any] = [:]) -> [String: Any] {
         let os = ProcessInfo.processInfo.operatingSystemVersion
         var props: [String: Any] = [
             "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
@@ -377,22 +405,70 @@ enum Telemetry {
             "$process_person_profile": false,   // no person profiles
             "$geoip_disable": true,             // no location lookup
         ]
-        if let budsModel { props["buds_model"] = modelName(budsModel) }
-        return ["api_key": token, "event": "app_active", "distinct_id": installID, "properties": props]
+        props.merge(extra) { $1 }
+        return ["api_key": token, "event": event, "distinct_id": installID, "properties": props]
     }
 
-    /// Cheap to call often: sends at most once per UTC day, and only when enabled.
-    static func pingIfDue(budsModel: String?) {
+    /// Sends `event` at most once per UTC day per `key` (default: the event name), only when enabled.
+    /// Events: app_launched (every day the app runs), app_active (days the buds connect),
+    /// connect_failed with a reason code.
+    static func captureDaily(_ event: String, key: String? = nil, extra: [String: Any] = [:]) {
         guard enabled, !token.isEmpty else { return }
         let day = ISO8601DateFormatter.string(from: Date(), timeZone: .gmt, formatOptions: [.withFullDate])
-        guard store.string(forKey: "lastPingDay") != day,
-              let body = try? JSONSerialization.data(withJSONObject: payload(budsModel: budsModel)) else { return }
+        let dedupe = "sent-" + (key ?? event)
+        guard store.string(forKey: dedupe) != day,
+              let body = try? JSONSerialization.data(withJSONObject: payload(event: event, extra: extra)) else { return }
         var req = URLRequest(url: URL(string: host + "/i/v0/e/")!)
         req.httpMethod = "POST"; req.httpBody = body
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         URLSession.shared.dataTask(with: req) { _, resp, _ in
             if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                DispatchQueue.main.async { store.set(day, forKey: "lastPingDay") }
+                DispatchQueue.main.async { store.set(day, forKey: dedupe) }
+            }
+        }.resume()
+    }
+}
+
+// MARK: - Update check
+
+/// Once a day, asks GitHub for the latest release. Sends nothing about the user (a plain
+/// public API request); works even with usage stats turned off.
+enum Updater {
+    static let api = URL(string: "https://api.github.com/repos/notacp/BudsDeck/releases/latest")!
+    static var store = UserDefaults.standard
+    static var current: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0" }
+
+    /// Numeric compare of dotted versions ("0.10.0" > "0.9.2"); a leading "v" is ignored.
+    static func isNewer(_ a: String, than b: String) -> Bool {
+        func parts(_ v: String) -> [Int] { v.trimmingCharacters(in: CharacterSet(charactersIn: "vV")).split(separator: ".").map { Int($0) ?? 0 } }
+        let x = parts(a), y = parts(b)
+        for i in 0..<max(x.count, y.count) {
+            let l = i < x.count ? x[i] : 0, r = i < y.count ? y[i] : 0
+            if l != r { return l > r }
+        }
+        return false
+    }
+
+    /// Newer release than the running one, if the last check found one.
+    static var available: (version: String, url: URL)? {
+        guard let v = store.string(forKey: "latestVersion"), isNewer(v, than: current),
+              let u = store.string(forKey: "latestURL").flatMap(URL.init(string:)) else { return nil }
+        return (v, u)
+    }
+
+    static func checkIfDue(_ done: @escaping () -> Void) {
+        let day = ISO8601DateFormatter.string(from: Date(), timeZone: .gmt, formatOptions: [.withFullDate])
+        guard store.string(forKey: "updateCheckedDay") != day else { return }
+        var req = URLRequest(url: api)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        URLSession.shared.dataTask(with: req) { data, resp, _ in
+            guard (resp as? HTTPURLResponse)?.statusCode == 200, let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = json["tag_name"] as? String, let url = json["html_url"] as? String else { return }
+            DispatchQueue.main.async {
+                store.set(tag.trimmingCharacters(in: CharacterSet(charactersIn: "vV")), forKey: "latestVersion")
+                store.set(url, forKey: "latestURL"); store.set(day, forKey: "updateCheckedDay")
+                done()
             }
         }.resume()
     }
@@ -415,13 +491,27 @@ final class BudsModel: ObservableObject {
             if let m = link.mode, ancVariants.contains(where: { $0.bit == m }) { ancBit = m }
             objectWillChange.send()
         }
+        link.onFailure = { [weak self] reason in
+            let buds = Telemetry.budsProps(name: self?.link.device?.name, productID: self?.link.productID)
+            Telemetry.captureDaily("connect_failed", key: "connect_failed-" + reason, extra: buds.merging(["reason": reason]) { $1 })
+        }
         // Defer the first refresh: publishing during @StateObject init is not allowed.
-        DispatchQueue.main.async { [weak self] in self?.link.refresh() }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            link.refresh()
+            Telemetry.captureDaily("app_launched")
+            if bluetoothDenied { Telemetry.captureDaily("connect_failed", key: "connect_failed-permission_denied", extra: ["reason": "permission_denied"]) }
+            Updater.checkIfDue { [weak self] in self?.objectWillChange.send() }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.link.refresh()
-            // Once a day at most, and only on days the buds actually connect, so
-            // "active" means used with earbuds and the model is always known.
-            if let model = self?.link.device?.name { Telemetry.pingIfDue(budsModel: model) }
+            guard let self else { return }
+            link.refresh()
+            // Once a day at most, and only on days the buds actually connect (and the model
+            // code has been read), so "active" means used with earbuds.
+            if let name = link.device?.name, let pid = link.productID {
+                Telemetry.captureDaily("app_active", extra: Telemetry.budsProps(name: name, productID: pid))
+            }
+            Updater.checkIfDue { [weak self] in self?.objectWillChange.send() }
         }
     }
 
@@ -608,6 +698,21 @@ struct Panel: View {
                 }
             }
 
+            if let update = Updater.available {
+                Button { NSWorkspace.shared.open(update.url) } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.down.circle.fill").foregroundStyle(Color.accentColor)
+                        Text("BudsDeck \(update.version) is available").font(.caption.weight(.medium))
+                        Spacer(minLength: 0)
+                        Text("Download").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 9)
+                    .contentShape(Rectangle())
+                    .glassEffect(.regular.tint(Color.accentColor.opacity(0.18)).interactive(), in: .rect(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+            }
+
             if !link.battery.isEmpty {
                 GlassEffectContainer(spacing: 6) {
                     HStack(spacing: 6) {
@@ -780,16 +885,28 @@ if CommandLine.arguments.contains("--selftest") {
     e.eq = 1; precondition(e.selectedCustom?.id == 4)   // preset active → first slot
     // Telemetry payload carries only the documented, non-identifying fields.
     Telemetry.store = UserDefaults(suiteName: "budsdeck.selftest")!
-    let tp = Telemetry.payload(budsModel: "OnePlus Buds 3")
+    let tp = Telemetry.payload(extra: Telemetry.budsProps(name: "OnePlus Buds 3", productID: "063C14"))
     let props = tp["properties"] as! [String: Any]
-    precondition(Set(props.keys) == ["app_version", "os_version", "arch", "buds_model", "$process_person_profile", "$geoip_disable"])
+    precondition(Set(props.keys) == ["app_version", "os_version", "arch", "buds_model", "product_id", "$process_person_profile", "$geoip_disable"])
     precondition(tp["event"] as? String == "app_active" && UUID(uuidString: tp["distinct_id"] as! String) != nil)
     precondition(props["$process_person_profile"] as? Bool == false)
     // A renamed device never leaks the user's chosen name.
     precondition(Telemetry.modelName("Pradyumn’s OnePlus Buds 3") == "OnePlus Buds 3")
     precondition(Telemetry.modelName("OnePlus Buds Pro 3") == "OnePlus Buds Pro 3")
     precondition(Telemetry.modelName("Alex's earbuds") == "other")
-    precondition((Telemetry.payload(budsModel: "Sam's Nord Buds")["properties"] as! [String: Any])["buds_model"] as? String == "other")
+    precondition(Telemetry.budsProps(name: "Sam's Nord Buds", productID: nil)["buds_model"] as? String == "other")
+    let launched = Telemetry.payload(event: "app_launched")["properties"] as! [String: Any]
+    precondition(launched["buds_model"] == nil && launched["product_id"] == nil)   // launch carries no buds data
+    // Product ID: real 0x8103 reply from Buds 3 ("00 14 3C 06").
+    feed2(l, [0xAA, 0x0B, 0, 0, 0x03, 0x81, 0x04, 0x04, 0x00, 0x00, 0x14, 0x3C, 0x06])
+    precondition(l.productID == "063C14")
+    // Failure reporting: no device paired → reason sent once; update compare.
+    var reasons: [String] = []
+    let f = BudsLink(); f.deviceProvider = { nil }; f.onFailure = { reasons.append($0) }
+    f.ensureOpen()
+    precondition(reasons.allSatisfy { $0 == "no_compatible_device" })
+    precondition(Updater.isNewer("0.3.1", than: "0.3.0") && Updater.isNewer("v0.10.0", than: "0.9.9"))
+    precondition(!Updater.isNewer("0.3.0", than: "0.3.0") && !Updater.isNewer("0.2.9", than: "0.3"))
     Telemetry.enabled = false; precondition(!Telemetry.enabled)
     l.store.removePersistentDomain(forName: "budsdeck.selftest")
     print("selftest ok"); exit(0)

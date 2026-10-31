@@ -27,7 +27,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>BudsDeck</string>
   <key>CFBundleExecutable</key><string>BudsDeck</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.2.1</string>
+  <key>CFBundleShortVersionString</key><string>0.3.0</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSUIElement</key><true/>
   <key>NSBluetoothAlwaysUsageDescription</key><string>BudsDeck talks to your earbuds to show battery and switch noise control and EQ.</string>

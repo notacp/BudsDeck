@@ -73,15 +73,23 @@ To update, `git pull` and run `./build.sh` again; it restarts the app. `./build.
 
 ## Privacy
 
-On days your earbuds connect, BudsDeck sends one anonymous `app_active` ping so the maintainer can see roughly how many people use it, with which versions and which earbud models. That's it.
+BudsDeck sends a few anonymous events so the maintainer can see roughly how many people use it, and whether it works for them. Each is sent **at most once per day**:
+
+| Event | When | Why |
+|---|---|---|
+| `app_launched` | the app runs | count installs, including ones where the earbuds never connect |
+| `app_active` | your earbuds connect | count working installs, by model |
+| `connect_failed` | connecting fails, with a reason code (`no_compatible_device`, `permission_denied`, `timeout`, `open_failed`) | find what's broken for whom |
 
 | Sent | Not sent |
 |---|---|
 | A random install ID created on first launch | Your name, email or Apple ID |
 | App version, macOS version, Apple Silicon or Intel | Your IP address (discarded by the analytics project) |
-| The earbuds' model, e.g. "OnePlus Buds 3", picked from a fixed list of known models (otherwise "other") | Your earbuds' Bluetooth name if you renamed them, Bluetooth addresses, settings, listening activity |
+| The earbuds' model, e.g. "OnePlus Buds 3", picked from a fixed list of known models (otherwise "other"), and the model code the earbuds report (e.g. `063C14`, identical for every unit of that model) | Your earbuds' Bluetooth name if you renamed them, Bluetooth addresses, settings, listening activity |
 
 Turn it off any time: gear menu in the panel → **Share Anonymous Usage Stats**. The code is in `Telemetry` in [`BudsDeck.swift`](BudsDeck.swift).
+
+**Update check:** once a day BudsDeck asks GitHub's public API for the latest release and shows a banner when a newer version exists. That request sends nothing about you (GitHub sees an ordinary web request) and is independent of the usage-stats setting.
 
 ## How it works
 

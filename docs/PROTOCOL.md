@@ -22,6 +22,7 @@ AA <len varint> 00 00 <cmd u16le> <seq u8> <paylen u16le> <payload>
 
 | Cmd | Payload | Reply payload | Meaning |
 |---|---|---|---|
+| `0x0103` | none | `00 <b1> <b2> <b3>` | Product (model) code, read as `b3 b2 b1`. Buds 3: `063C14` |
 | `0x0106` | none | `00 <n> (<idx> <val>)×n` | Battery. idx 1 = left, 2 = right, 3 = case. Low 7 bits of val = %, bit 7 = charging |
 | `0x010C` | `01 01` | `00 01 01 <bitmap u16le>` | Current noise mode (lowest set bit) |
 | `0x010C` | `04 01` | `00 04 01 <bitmap u16le>` | Strength the Adaptive mode is currently using |
