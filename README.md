@@ -29,7 +29,7 @@ These earbuds are normally configured through OnePlus's HeyMelody app on Android
 | OnePlus Buds 3 | Tested: noise modes, ANC levels, EQ presets, custom EQ, battery |
 | Other OnePlus / OPPO Enco / realme buds | Should connect (same protocol); mode bits and EQ presets can differ per model |
 
-Requires **macOS 26 or later on Apple Silicon**. Other people's reports for other models are welcome; open an issue.
+Requires **macOS 26 or later on an Apple Silicon Mac**, plus the **Xcode 26 command-line tools** to build (older tools lack the Liquid Glass APIs). Reports for other models are welcome; open an issue.
 
 ## Install
 
@@ -42,14 +42,15 @@ cd BudsDeck
 open ~/Applications/BudsDeck.app
 ```
 
-Allow Bluetooth access when macOS asks. To launch it automatically: System Settings → General → Login Items → **+** → BudsDeck.
+Allow Bluetooth access when macOS asks. Tick **Open at login** in the panel to start it automatically. To update, `git pull` and run `./build.sh` again; it restarts the app.
 
 ## Good to know
 
-- **Wear both buds to change noise modes.** The firmware rejects mode changes while the buds are out of your ears. BudsDeck reads the wear sensors and shows a notice instead of sending the change.
+- **Wear at least one bud to change noise modes.** The firmware rejects mode changes while both buds are out of your ears. BudsDeck reads the wear sensors and shows a notice instead.
+- **Wear status is polled.** The buds don't announce when you put them in, so BudsDeck checks every 3 seconds while the panel is open and every minute otherwise.
 - **One controller at a time.** The buds accept a single control connection. Quit BudsDeck before using another tool that talks to them.
 - **ANC level mapping** follows the bit order a Buds 4 / Buds Pro 3 implementation verified on hardware (Max, Moderate, Mild, Adaptive), and it matches Buds 3 behaviour. It has not been checked by ear on Buds 3. If a level sounds wrong, adjust `ancVariants` in `BudsDeck.swift`.
-- **Saving a custom EQ merges the custom slots.** The buds keep one custom slot afterwards. Flat placeholder slots disappear; presets are not affected.
+- **Custom EQ edits the selected slot.** If you made custom EQs in HeyMelody, BudsDeck edits whichever one is active. Unnamed flat "Custom" placeholder slots may merge into one; named slots are kept.
 - **Rebuilds and Bluetooth permission:** ad-hoc builds re-ask for Bluetooth permission after every rebuild. To avoid this, put your own signing identity in `local.env` (see `build.sh`).
 
 ## How it works

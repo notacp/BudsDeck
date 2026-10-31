@@ -27,5 +27,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 codesign --force --sign "${SIGN_ID:--}" "$APP"
 "$APP/Contents/MacOS/BudsDeck" --selftest
+# Quit a running copy first, otherwise `open` just re-activates the old version.
+WAS_RUNNING=0; pkill -x BudsDeck && WAS_RUNNING=1 && sleep 1
 mkdir -p ~/Applications && rm -rf ~/Applications/BudsDeck.app && cp -R "$APP" ~/Applications/
 echo "installed ~/Applications/BudsDeck.app"
+[ "$WAS_RUNNING" = 1 ] && open ~/Applications/BudsDeck.app && echo "restarted BudsDeck"
+exit 0

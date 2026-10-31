@@ -7,6 +7,8 @@
 import AppKit
 import SwiftUI
 import IOBluetooth
+import CoreBluetooth
+import ServiceManagement
 
 // MARK: - Noise modes (bit index in the 0x0404 / 0x010C bitmap)
 
@@ -44,7 +46,7 @@ func parseWear(_ pairs: ArraySlice<UInt8>) -> [String: Bool] {
     return out
 }
 
-let notWornMessage = "Put both earbuds in to change noise control"
+let notWornMessage = "Put an earbud in to change noise control"
 
 /// Sound Master presets. IDs verified on Buds 3 (set + read back); names are OnePlus's,
 /// matching the IDs the Buds Pro 3 uses (Balanced 0, Bold 1, Serenade 2, Bass 3).
@@ -132,7 +134,10 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
     var device: IOBluetoothDevice?
     var channel: IOBluetoothRFCOMMChannel?
+    var opening = false          // one open at a time; extra opens never complete and leak
     var ready = false            // false until the buds' on-open burst has passed
+    /// Injectable for tests; default finds a connected HeyMelody device.
+    var deviceProvider: () -> IOBluetoothDevice? = BudsLink.findConnected
     var seq: UInt8 = 0
     var rx: [UInt8] = []
     var queue: [[UInt8]] = []
@@ -143,19 +148,26 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     var customEQs: [CustomEQ] = []
     /// The buds only report the case while docked / lid recently open, so keep the last reading.
     var store = UserDefaults.standard
+    /// Keyed per device so a second pair of buds never shows the first pair's case.
+    private var caseKey: String { "case-" + (device?.addressString ?? "") }
     var lastCase: (level: Int, charging: Bool, at: Date)? {
-        guard let at = store.object(forKey: "caseAt") as? Date else { return nil }
-        return (store.integer(forKey: "caseLevel"), store.bool(forKey: "caseCharging"), at)
+        guard let d = store.dictionary(forKey: caseKey), let at = d["at"] as? Date,
+              let level = d["level"] as? Int else { return nil }
+        return (level, d["charging"] as? Bool ?? false, at)
     }
     var lastError: String?       // connection problems
     var noiseNotice: String?     // why the last noise-mode change didn't happen
     var inEar: [String: Bool] = [:]
-    /// nil until the buds have reported wear status.
-    var bothWorn: Bool? { inEar["L"].flatMap { l in inEar["R"].map { l && $0 } } }
+    /// nil until the buds have reported wear status. The buds run noise control with one
+    /// bud in, so only "no bud in" blocks a mode change.
+    var anyWorn: Bool? { inEar.isEmpty ? nil : inEar.values.contains(true) }
+
+    /// The custom EQ slot that is actually selected (falls back to the first one).
+    var selectedCustom: CustomEQ? { customEQs.first { $0.id == eq } ?? customEQs.first }
     var onChange: () -> Void = {}
 
     /// First paired + connected device that advertises the HeyMelody service.
-    func findDevice() -> IOBluetoothDevice? {
+    static func findConnected() -> IOBluetoothDevice? {
         let paired = (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? []
         return paired.first { d in
             d.isConnected() && ((d.services as? [IOBluetoothSDPServiceRecord]) ?? [])
@@ -163,11 +175,18 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         }
     }
 
+    /// Forget everything about the last connection so the panel never shows stale data.
+    func resetState() {
+        device = nil; channel = nil; opening = false; ready = false
+        queue.removeAll(); rx.removeAll()
+        battery = [:]; mode = nil; eq = nil; customEQs = []; inEar = [:]; noiseNotice = nil
+    }
+
     func ensureOpen() {
-        if channel?.isOpen() == true { return }
+        if channel?.isOpen() == true || opening { return }
         ready = false
-        guard let dev = findDevice() else {
-            device = nil; lastError = nil; onChange(); return  // the header already says "No buds connected"
+        guard let dev = deviceProvider() else {
+            resetState(); lastError = nil; onChange(); return  // the header already says "No buds connected"
         }
         device = dev
         let rec = (dev.services as? [IOBluetoothSDPServiceRecord])?
@@ -178,24 +197,39 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         }
         var ch: IOBluetoothRFCOMMChannel?
         let r = dev.openRFCOMMChannelAsync(&ch, withChannelID: chID, delegate: self)
-        if r != kIOReturnSuccess { lastError = "Open failed (\(String(format: "0x%08X", r)))"; onChange() }
-        channel = ch
+        guard r == kIOReturnSuccess, let ch else {
+            lastError = "Couldn't reach the earbuds"; channel = nil; queue.removeAll(); onChange(); return
+        }
+        channel = ch; opening = true
+        // If the open never completes, give up so the next refresh can retry.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self, self.opening, self.channel === ch else { return }
+            ch.close(); self.channel = nil; self.opening = false; self.queue.removeAll()
+            self.lastError = "Couldn't reach the earbuds"; self.onChange()
+        }
     }
 
     func send(_ cmd: Cmd, _ payload: [UInt8] = []) {
+        ensureOpen()
+        // No connection and none in progress: drop it. Queueing would replay stale
+        // commands (including settings changes) whenever the buds reconnect.
+        guard channel != nil else { return }
         seq = seq &+ 1; if seq == 0 { seq = 1 }
         queue.append(frame(cmd.rawValue, seq: seq, payload))
-        ensureOpen()
         flush()
     }
 
-    func refresh() { send(.battery); send(.wearGet); send(.noiseGet, [0x01, 0x01]); send(.eqGet); send(.eqListGet) }
+    /// light: just what changes often (battery, wear, mode); used while the panel is open.
+    func refresh(light: Bool = false) {
+        send(.battery); send(.wearGet); send(.noiseGet, [0x01, 0x01])
+        if !light { send(.eqGet); send(.eqListGet) }
+    }
 
     func setPreset(_ id: Int) { send(.eqPresetSet, [UInt8(id)]); send(.eqGet) }
 
     /// Save gains into the first custom slot and select it (op 2); create one if none exists.
     func setCustom(_ db: [Int]) {
-        if let slot = customEQs.first {
+        if let slot = selectedCustom {
             send(.eqCustomSet, customEQPayload(op: 2, id: slot.id, name: slot.name, db: db, min: slot.min, max: slot.max))
         } else {
             send(.eqCustomSet, customEQPayload(op: 1, id: 0, name: "Custom", db: db))
@@ -204,8 +238,9 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 
     func setMode(_ bit: Int) {
-        // The firmware rejects mode changes unless both buds are worn; don't send a doomed command.
-        if bothWorn == false { noiseNotice = notWornMessage; onChange(); return }
+        // The firmware rejects mode changes with no bud worn; don't send a doomed command.
+        // With one bud in, send it and let the firmware decide (0x0E → notice).
+        if anyWorn == false { noiseNotice = notWornMessage; onChange(); return }
         send(.noiseSet, [0x01, 0x01] + bitmap(bit))
         send(.noiseGet, [0x01, 0x01])
     }
@@ -221,19 +256,23 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     // MARK: IOBluetoothRFCOMMChannelDelegate
 
     func rfcommChannelOpenComplete(_ ch: IOBluetoothRFCOMMChannel!, status: IOReturn) {
+        guard ch === channel else { return }   // a superseded/timed-out attempt
+        opening = false
         guard status == kIOReturnSuccess else {
-            lastError = "Couldn't open the control channel"; channel = nil; onChange(); return
+            lastError = "Couldn't reach the earbuds"; channel = nil; queue.removeAll(); onChange(); return
         }
         lastError = nil
         // The buds push a host-list notification right after open and drop
         // commands sent during that burst; give it a second.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.ready = true; self?.flush()
+            guard let self, self.channel === ch else { return }
+            self.ready = true; self.flush()
         }
     }
 
     func rfcommChannelClosed(_ ch: IOBluetoothRFCOMMChannel!) {
-        channel = nil; ready = false; onChange()
+        guard ch === channel else { return }
+        resetState(); onChange()   // e.g. buds went into the case; next refresh reconnects
     }
 
     func rfcommChannelData(_ ch: IOBluetoothRFCOMMChannel!, data ptr: UnsafeMutableRawPointer!, length: Int) {
@@ -253,8 +292,7 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
                 i += 2
             }
             if let c = battery["Case"] {
-                store.set(c.level, forKey: "caseLevel"); store.set(c.charging, forKey: "caseCharging")
-                store.set(Date(), forKey: "caseAt")
+                store.set(["level": c.level, "charging": c.charging, "at": Date()], forKey: caseKey)
             }
         case Cmd.noiseGet.rawValue | 0x8000 where p.count >= 4 && p[0] == 0 && p[2] == 0x01:
             let bits = p[3...].enumerated().reduce(0) { $0 | Int($1.element) << ($1.offset * 8) }
@@ -282,7 +320,7 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     private func applyWear(_ w: [String: Bool]) {
         guard !w.isEmpty else { return }
         inEar.merge(w) { $1 }
-        if bothWorn == true, noiseNotice == notWornMessage { noiseNotice = nil }
+        if anyWorn == true, noiseNotice == notWornMessage { noiseNotice = nil }
     }
 }
 
@@ -303,17 +341,29 @@ final class BudsModel: ObservableObject {
             if let m = link.mode, ancVariants.contains(where: { $0.bit == m }) { ancBit = m }
             objectWillChange.send()
         }
-        link.refresh()
+        // Defer the first refresh: publishing during @StateObject init is not allowed.
+        DispatchQueue.main.async { [weak self] in self?.link.refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.link.refresh() }
     }
 
+    /// Bluetooth permission for this app (IOBluetooth is gated by the same TCC grant).
+    var bluetoothDenied: Bool { [.denied, .restricted].contains(CBManager.authorization) }
+
+    var openAtLogin: Bool {
+        get { SMAppService.mainApp.status == .enabled }
+        set {
+            try? newValue ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister()
+            objectWillChange.send()
+        }
+    }
+
     var isANC: Bool { link.mode.map { m in ancVariants.contains { $0.bit == m } } ?? false }
+    /// Same symbols as the panel's mode buttons, so the menu bar shows the mode at a glance.
     var menuSymbol: String {
         switch link.mode {
-        case modeOff?: "earbuds"
         case modeTransparency?: "ear.badge.waveform"
-        case .some: "earbuds.case.fill"
-        case nil: "earbuds"
+        case let m? where ancVariants.contains(where: { $0.bit == m }): "waveform.slash"
+        default: "earbuds"
         }
     }
 }
@@ -357,6 +407,7 @@ struct EQSection: View {
     @ObservedObject var model: BudsModel
     @State private var open = false
     @State private var draft: [Double] = Array(repeating: 0, count: 6)
+    @State private var dragging: Int?   // band being dragged; don't overwrite it from the buds
     var link: BudsLink { model.link }
     var isCustom: Bool { link.eq.map { id in !eqPresets.contains { $0.id == id } } ?? false }
     var currentName: String {
@@ -399,6 +450,7 @@ struct EQSection: View {
                                 Text(bandLabel(eqBands[i])).font(.caption.monospacedDigit())
                                     .frame(width: 34, alignment: .trailing).foregroundStyle(.secondary)
                                 Slider(value: $draft[i], in: -6...6, step: 1) { editing in
+                                    dragging = editing ? i : nil
                                     if !editing { link.setCustom(draft.map { Int($0) }) }
                                 }
                                 Text(String(format: "%+d", Int(draft[i]))).font(.caption.monospacedDigit())
@@ -417,11 +469,13 @@ struct EQSection: View {
             }
         }
         .onAppear(perform: syncDraft)
-        .onChange(of: link.customEQs.first?.db ?? []) { syncDraft() }
+        .onChange(of: link.selectedCustom?.db ?? []) { syncDraft() }
+        .onChange(of: link.selectedCustom?.id) { syncDraft() }
     }
 
     private func syncDraft() {
-        if let db = link.customEQs.first?.db, db.count == 6 { draft = db.map(Double.init) }
+        guard dragging == nil, let db = link.selectedCustom?.db, db.count == 6 else { return }
+        draft = db.map(Double.init)
     }
 
     private func bandLabel(_ f: Int) -> String { f >= 1000 ? "\(f / 1000)k" : "\(f)" }
@@ -453,6 +507,7 @@ struct Notice: View {
 
 struct Panel: View {
     @ObservedObject var model: BudsModel
+    @State private var panelOpen = false
     var link: BudsLink { model.link }
 
     var body: some View {
@@ -462,8 +517,8 @@ struct Panel: View {
                 Image(systemName: "earbuds").font(.title2)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(link.device?.name ?? "No buds connected").font(.headline)
-                    Text(!connected ? "Connect HeyMelody earbuds in Bluetooth"
-                         : link.bothWorn == false ? "Not in your ears" : "Listening Mode")
+                    Text(!connected ? "Connect your OnePlus, OPPO or realme earbuds in Bluetooth settings"
+                         : link.anyWorn == false ? "Not in your ears" : "Listening Mode")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -502,7 +557,16 @@ struct Panel: View {
 
             EQSection(model: model)
 
-            if connected, let notice = link.noiseNotice ?? (link.bothWorn == false ? notWornMessage : nil) {
+            if model.bluetoothDenied {
+                Notice(text: "BudsDeck needs Bluetooth access. Turn it on in System Settings › Privacy & Security › Bluetooth.",
+                       symbol: "lock.shield")
+                Button("Open Bluetooth Privacy Settings") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth")!)
+                }
+                .buttonStyle(.borderless).font(.caption)
+            }
+
+            if connected, let notice = link.noiseNotice ?? (link.anyWorn == false ? notWornMessage : nil) {
                 Notice(text: notice, symbol: notice == notWornMessage ? "earbuds" : "exclamationmark.circle")
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
@@ -514,6 +578,9 @@ struct Panel: View {
             HStack {
                 Button("Refresh") { link.refresh() }
                 Spacer()
+                Toggle("Open at login", isOn: Binding(get: { model.openAtLogin }, set: { model.openAtLogin = $0 }))
+                    .toggleStyle(.checkbox)
+                Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
             }
             .buttonStyle(.borderless).font(.caption)
@@ -521,9 +588,16 @@ struct Panel: View {
         .padding(16)
         .frame(width: 320)
         .animation(.snappy, value: link.noiseNotice)
-        .animation(.snappy, value: link.bothWorn)
-        // Refresh each time the panel window comes forward.
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in link.refresh() }
+        .animation(.snappy, value: link.anyWorn)
+        // Refresh when the panel comes forward, then every 3 s while it stays open:
+        // the buds don't announce wear changes, so polling is the only way to stay current.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            panelOpen = true; link.refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in panelOpen = false }
+        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
+            if panelOpen { link.refresh(light: true) }
+        }
     }
 }
 
@@ -574,10 +648,29 @@ if CommandLine.arguments.contains("--selftest") {
     feed2(w, [0xAA, 0x0C, 0, 0, 0x0C, 0x81, 0x02, 0x05, 0x00, 0x00, 0x01, 0x01, 0x08, 0x00])  // mode poll
     precondition(w.noiseNotice == notWornMessage)                                 // must not flicker away
     feed2(w, [0xAA, 0x0F, 0, 0, 0x09, 0x81, 0x03, 0x08, 0x00, 0x00, 0x03, 0x01, 0x07, 0x02, 0x07, 0x03, 0x04])
-    precondition(w.bothWorn == true && w.noiseNotice == nil)                      // worn → cleared
+    precondition(w.anyWorn == true && w.noiseNotice == nil)                      // worn → cleared
     // Case battery: live reading is remembered; a later report without the case keeps it as lastCase.
     feed2(l, [0xAA, 0x0D, 0, 0, 0x06, 0x81, 0x09, 0x06, 0x00, 0x00, 0x02, 0x01, 0x5A, 0x02, 0x5A])  // real: L 90, R 90
     precondition(l.battery["Case"] == nil && l.battery["L"]!.level == 90 && l.lastCase?.level == 40)
+    // Disconnected: commands are dropped, not queued for a later replay.
+    let d = BudsLink(); d.deviceProvider = { nil }
+    d.battery = ["L": (90, false)]; d.mode = 4
+    d.setMode(modeTransparency); d.refresh()
+    precondition(d.queue.isEmpty && d.device == nil && d.battery.isEmpty && d.mode == nil)
+    // Channel closed (buds into the case): stale state cleared.
+    let c = BudsLink(); c.battery = ["L": (90, false)]; c.inEar = ["L": true]; c.queue = [[0xAA]]
+    c.rfcommChannelClosed(nil)
+    precondition(c.battery.isEmpty && c.inEar.isEmpty && c.queue.isEmpty)
+    // One bud in: allowed (anyWorn). Both out: blocked with the notice.
+    let o = BudsLink(); o.deviceProvider = { nil }
+    o.inEar = ["L": true, "R": false]; precondition(o.anyWorn == true)
+    o.inEar = ["L": false, "R": false]; o.setMode(4); precondition(o.noiseNotice == notWornMessage)
+    // EQ edits target the selected custom slot, not the first one.
+    let e = BudsLink()
+    e.customEQs = [CustomEQ(id: 4, name: "Custom", min: -6, max: 6, db: [0, 0, 0, 0, 0, 0]),
+                   CustomEQ(id: 6, name: "Mine", min: -6, max: 6, db: [2, 2, 2, 2, 2, 2])]
+    e.eq = 6; precondition(e.selectedCustom?.name == "Mine")
+    e.eq = 1; precondition(e.selectedCustom?.id == 4)   // preset active → first slot
     l.store.removePersistentDomain(forName: "budsdeck.selftest")
     print("selftest ok"); exit(0)
 }
