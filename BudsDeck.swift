@@ -517,9 +517,10 @@ struct Panel: View {
                 Image(systemName: "earbuds").font(.title2)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(link.device?.name ?? "No buds connected").font(.headline)
-                    Text(!connected ? "Connect your OnePlus, OPPO or realme earbuds in Bluetooth settings"
+                    Text(!connected ? "OnePlus, OPPO or realme earbuds"
                          : link.anyWorn == false ? "Not in your ears" : "Listening Mode")
                         .font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -537,25 +538,39 @@ struct Panel: View {
                 }
             }
 
-            GlassEffectContainer(spacing: 12) {
-                HStack(spacing: 12) {
-                    ModeButton(title: "Off", symbol: "circle.slash", active: link.mode == modeOff,
-                               enabled: connected) { link.setMode(modeOff) }
-                    ModeButton(title: "Noise Cancelling", symbol: "waveform.slash", active: model.isANC,
-                               enabled: connected) { link.setMode(model.ancBit) }
-                    ModeButton(title: "Transparency", symbol: "ear.badge.waveform", active: link.mode == modeTransparency,
-                               enabled: connected) { link.setMode(modeTransparency) }
+            if !connected {
+                // Empty state: no dead controls, just the way to connect.
+                Button {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Bluetooth-Settings.extension")!)
+                } label: {
+                    Label("Open Bluetooth Settings", systemImage: "gearshape")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity).padding(.vertical, 9)
+                        .contentShape(Rectangle())
+                        .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 12))
                 }
-            }
-
-            if model.isANC && ancVariants.count > 1 {
-                Picker("Level", selection: Binding(get: { model.ancBit }, set: { model.ancBit = $0; link.setMode($0) })) {
-                    ForEach(ancVariants, id: \.bit) { Text($0.label).tag($0.bit) }
+                .buttonStyle(.plain)
+            } else {
+                GlassEffectContainer(spacing: 12) {
+                    HStack(spacing: 12) {
+                        ModeButton(title: "Off", symbol: "circle.slash", active: link.mode == modeOff,
+                                   enabled: connected) { link.setMode(modeOff) }
+                        ModeButton(title: "Noise Cancelling", symbol: "waveform.slash", active: model.isANC,
+                                   enabled: connected) { link.setMode(model.ancBit) }
+                        ModeButton(title: "Transparency", symbol: "ear.badge.waveform", active: link.mode == modeTransparency,
+                                   enabled: connected) { link.setMode(modeTransparency) }
+                    }
                 }
-                .pickerStyle(.menu)
-            }
 
-            EQSection(model: model)
+                if model.isANC && ancVariants.count > 1 {
+                    Picker("Level", selection: Binding(get: { model.ancBit }, set: { model.ancBit = $0; link.setMode($0) })) {
+                        ForEach(ancVariants, id: \.bit) { Text($0.label).tag($0.bit) }
+                    }
+                    .pickerStyle(.menu)
+                }
+
+                EQSection(model: model)
+            }
 
             if model.bluetoothDenied {
                 Notice(text: "BudsDeck needs Bluetooth access. Turn it on in System Settings › Privacy & Security › Bluetooth.",
