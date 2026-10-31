@@ -19,6 +19,13 @@ for arch in arm64 x86_64; do
   swiftc -O -swift-version 5 -target $arch-apple-macos26.0 BudsDeck.swift -o build/BudsDeck-$arch
 done
 lipo -create build/BudsDeck-arm64 build/BudsDeck-x86_64 -output "$APP/Contents/MacOS/BudsDeck"
+# App icon: generated from assets/icon-1024.png (the single source) with built-in macOS tools.
+ICONSET=build/AppIcon.iconset; rm -rf "$ICONSET" && mkdir -p "$ICONSET" "$APP/Contents/Resources"
+for s in 16 32 128 256 512; do
+  sips -z $s $s assets/icon-1024.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  sips -z $((s*2)) $((s*2)) assets/icon-1024.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -26,8 +33,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>io.github.notacp.budsdeck</string>
   <key>CFBundleName</key><string>BudsDeck</string>
   <key>CFBundleExecutable</key><string>BudsDeck</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.0</string>
+  <key>CFBundleShortVersionString</key><string>0.3.1</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSUIElement</key><true/>
   <key>NSBluetoothAlwaysUsageDescription</key><string>BudsDeck talks to your earbuds to show battery and switch noise control and EQ.</string>
