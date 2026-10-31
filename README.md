@@ -46,9 +46,9 @@ Allow Bluetooth access when macOS asks. To launch it automatically: System Setti
 
 ## Good to know
 
-- **Wear both buds to change noise modes.** The firmware rejects mode changes while the buds are out of your ears.
+- **Wear both buds to change noise modes.** The firmware rejects mode changes while the buds are out of your ears. BudsDeck reads the wear sensors and shows a notice instead of sending the change.
 - **One controller at a time.** The buds accept a single control connection. Quit BudsDeck before using another tool that talks to them.
-- **ANC level order is unverified.** Adaptive is confirmed. Which of the three remaining levels is Max versus Mild is inferred, not measured. If it sounds reversed, swap the labels in `ancVariants` in `BudsDeck.swift`.
+- **ANC level mapping** follows the bit order a Buds 4 / Buds Pro 3 implementation verified on hardware (Max, Moderate, Mild, Adaptive), and it matches Buds 3 behaviour. It has not been checked by ear on Buds 3. If a level sounds wrong, adjust `ancVariants` in `BudsDeck.swift`.
 - **Saving a custom EQ merges the custom slots.** The buds keep one custom slot afterwards. Flat placeholder slots disappear; presets are not affected.
 - **Rebuilds and Bluetooth permission:** ad-hoc builds re-ask for Bluetooth permission after every rebuild. To avoid this, put your own signing identity in `local.env` (see `build.sh`).
 

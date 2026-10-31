@@ -13,19 +13,16 @@ import IOBluetooth
 let modeOff = 3
 let modeTransparency = 9
 
-/// Noise-cancelling levels. Naming follows the industry pattern: one automatic mode called
-/// "Adaptive" (Apple / Samsung / Nothing; OnePlus calls it "Smart Scene") plus OnePlus's own
-/// three-step ladder from the Buds 3 spec page.
-/// Evidence: bit 4 is where the ANC shortcut lands and isn't one of the strengths Smart
-/// auto-picks (it reported bits 5 and 6), so bit 4 = Adaptive.
-/// ponytail: Mild/Moderate/Max order across bits 5–7 is assumed (OnePlus's listed order);
-/// the ear A/B test was inconclusive in a quiet room. Swap labels if Max feels weakest.
-/// Bit 8 is accepted but left out: likely a transparency variant (it is on sibling OPPO models).
+/// Noise-cancelling levels. Naming: one automatic mode called "Adaptive" (Apple / Samsung /
+/// Nothing; OnePlus says "Smart Scene") plus OnePlus's Max / Moderate / Mild ladder.
+/// Bit order matches a hands-on Buds 4 / Buds Pro 3 implementation (0x10 High, 0x20 Moderate,
+/// 0x40 Low, 0x80 Auto) and our own data: Smart's auto-pick (0x010C type 4) reported bits 5
+/// and 6, i.e. strengths, never 7. Bit 8 is accepted but left out (transparency on siblings).
 let ancVariants: [(bit: Int, label: String)] = [
-    (4, "Adaptive"),
-    (7, "Max"),
-    (6, "Moderate"),
-    (5, "Mild"),
+    (7, "Adaptive"),
+    (4, "Max"),
+    (5, "Moderate"),
+    (6, "Mild"),
 ]
 
 // MARK: - Protocol
@@ -33,7 +30,21 @@ let ancVariants: [(bit: Int, label: String)] = [
 enum Cmd: UInt16 {
     case battery = 0x0106, noiseGet = 0x010C, noiseSet = 0x0404
     case eqGet = 0x010F, eqListGet = 0x0122, eqPresetSet = 0x0406, eqCustomSet = 0x0418
+    case wearGet = 0x0109, notify = 0x0204
 }
+
+/// Per-bud status pairs `(idx, flags)…` (idx 1 = L, 2 = R, 3 = case) → in-ear map.
+/// In each flags byte, 0x02 set = in an ear (0x01 clear = in the case).
+func parseWear(_ pairs: ArraySlice<UInt8>) -> [String: Bool] {
+    var out: [String: Bool] = [:], i = pairs.startIndex
+    while i + 1 < pairs.endIndex {
+        if let n = [1: "L", 2: "R"][Int(pairs[i])] { out[n] = pairs[i + 1] & 0x02 != 0 }
+        i += 2
+    }
+    return out
+}
+
+let notWornMessage = "Put both earbuds in to change noise control"
 
 /// Sound Master presets. IDs verified on Buds 3 (set + read back); names are OnePlus's,
 /// matching the IDs the Buds Pro 3 uses (Balanced 0, Bold 1, Serenade 2, Bass 3).
@@ -130,7 +141,11 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     var mode: Int?               // current bit index
     var eq: Int?                 // current EQ id (preset 0–3, or a custom slot id)
     var customEQs: [CustomEQ] = []
-    var lastError: String?
+    var lastError: String?       // connection problems
+    var noiseNotice: String?     // why the last noise-mode change didn't happen
+    var inEar: [String: Bool] = [:]
+    /// nil until the buds have reported wear status.
+    var bothWorn: Bool? { inEar["L"].flatMap { l in inEar["R"].map { l && $0 } } }
     var onChange: () -> Void = {}
 
     /// First paired + connected device that advertises the HeyMelody service.
@@ -146,7 +161,7 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         if channel?.isOpen() == true { return }
         ready = false
         guard let dev = findDevice() else {
-            device = nil; lastError = "Buds not connected"; onChange(); return
+            device = nil; lastError = nil; onChange(); return  // the header already says "No buds connected"
         }
         device = dev
         let rec = (dev.services as? [IOBluetoothSDPServiceRecord])?
@@ -168,7 +183,7 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         flush()
     }
 
-    func refresh() { send(.battery); send(.noiseGet, [0x01, 0x01]); send(.eqGet); send(.eqListGet) }
+    func refresh() { send(.battery); send(.wearGet); send(.noiseGet, [0x01, 0x01]); send(.eqGet); send(.eqListGet) }
 
     func setPreset(_ id: Int) { send(.eqPresetSet, [UInt8(id)]); send(.eqGet) }
 
@@ -183,6 +198,8 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 
     func setMode(_ bit: Int) {
+        // The firmware rejects mode changes unless both buds are worn; don't send a doomed command.
+        if bothWorn == false { noiseNotice = notWornMessage; onChange(); return }
         send(.noiseSet, [0x01, 0x01] + bitmap(bit))
         send(.noiseGet, [0x01, 0x01])
     }
@@ -199,8 +216,9 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
     func rfcommChannelOpenComplete(_ ch: IOBluetoothRFCOMMChannel!, status: IOReturn) {
         guard status == kIOReturnSuccess else {
-            lastError = "Open failed"; channel = nil; onChange(); return
+            lastError = "Couldn't open the control channel"; channel = nil; onChange(); return
         }
+        lastError = nil
         // The buds push a host-list notification right after open and drop
         // commands sent during that burst; give it a second.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
@@ -230,16 +248,30 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         case Cmd.noiseGet.rawValue | 0x8000 where p.count >= 4 && p[0] == 0 && p[2] == 0x01:
             let bits = p[3...].enumerated().reduce(0) { $0 | Int($1.element) << ($1.offset * 8) }
             mode = (0..<16).first { bits & (1 << $0) != 0 }
-            lastError = nil
         case Cmd.noiseSet.rawValue | 0x8000:
             // 0x0E = buds refuse while not worn (observed on Buds 3).
-            if let s = p.first, s != 0 { lastError = s == 0x0E ? "Put both buds in your ears" : "Rejected (0x\(String(s, radix: 16)))" }
+            switch p.first {
+            case 0?: noiseNotice = nil
+            case 0x0E?: noiseNotice = notWornMessage
+            case let s?: noiseNotice = "The earbuds didn't accept that mode (code \(s))"
+            case nil: break
+            }
+        case Cmd.wearGet.rawValue | 0x8000 where p.count >= 2 && p[0] == 0:
+            applyWear(parseWear(p[2...]))
+        case Cmd.notify.rawValue where p.count >= 6 && p[0] == 0x02:
+            applyWear(parseWear(p[2...]))   // live wear change: [02, ?, 01, L, 02, R, …]
         case Cmd.eqGet.rawValue | 0x8000 where p.count >= 2 && p[0] == 0:
             eq = Int(p[1])
         case Cmd.eqListGet.rawValue | 0x8000:
             customEQs = parseEQList(p)
         default: break  // other notifications (e.g. 0x0204 host list) ignored
         }
+    }
+
+    private func applyWear(_ w: [String: Bool]) {
+        guard !w.isEmpty else { return }
+        inEar.merge(w) { $1 }
+        if bothWorn == true, noiseNotice == notWornMessage { noiseNotice = nil }
     }
 }
 
@@ -249,8 +281,8 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
 final class BudsModel: ObservableObject {
     let link = BudsLink()
     /// ANC variant the big "Noise Cancelling" button returns to; remembered across launches.
-    @Published var ancBit: Int = UserDefaults.standard.object(forKey: "ancBit") as? Int ?? 4 {
-        didSet { UserDefaults.standard.set(ancBit, forKey: "ancBit") }
+    @Published var ancBit: Int = UserDefaults.standard.object(forKey: "ancLevelBit") as? Int ?? 7 {
+        didSet { UserDefaults.standard.set(ancBit, forKey: "ancLevelBit") }
     }
     private var timer: Timer?
 
@@ -394,6 +426,20 @@ struct EQSection: View {
     }
 }
 
+/// Calm, glass-styled status row (replaces a bare orange warning label).
+struct Notice: View {
+    let text: String, symbol: String
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol).foregroundStyle(.orange)
+            Text(text).font(.caption).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .glassEffect(.regular.tint(.orange.opacity(0.18)), in: .rect(cornerRadius: 12))
+    }
+}
+
 struct Panel: View {
     @ObservedObject var model: BudsModel
     var link: BudsLink { model.link }
@@ -405,7 +451,8 @@ struct Panel: View {
                 Image(systemName: "earbuds").font(.title2)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(link.device?.name ?? "No buds connected").font(.headline)
-                    Text(connected ? "Listening Mode" : "Connect HeyMelody earbuds in Bluetooth")
+                    Text(!connected ? "Connect HeyMelody earbuds in Bluetooth"
+                         : link.bothWorn == false ? "Not in your ears" : "Listening Mode")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -440,9 +487,12 @@ struct Panel: View {
 
             EQSection(model: model)
 
+            if connected, let notice = link.noiseNotice ?? (link.bothWorn == false ? notWornMessage : nil) {
+                Notice(text: notice, symbol: notice == notWornMessage ? "earbuds" : "exclamationmark.circle")
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
             if let e = link.lastError {
-                Label(e, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
+                Notice(text: e, symbol: "exclamationmark.triangle")
             }
 
             Divider()
@@ -455,6 +505,8 @@ struct Panel: View {
         }
         .padding(16)
         .frame(width: 300)
+        .animation(.snappy, value: link.noiseNotice)
+        .animation(.snappy, value: link.bothWorn)
         // Refresh each time the panel window comes forward.
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in link.refresh() }
     }
@@ -470,6 +522,10 @@ struct BudsDeckApp: App {
         }
         .menuBarExtraStyle(.window)
     }
+}
+
+func feed2(_ l: BudsLink, _ bytes: [UInt8]) {
+    var b = bytes; b.withUnsafeMutableBytes { l.rfcommChannelData(nil, data: $0.baseAddress, length: $0.count) }
 }
 
 // `BudsDeck --selftest`: frame codec against bytes captured from real Buds 3.
@@ -492,6 +548,16 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(eqs.count == 1 && eqs[0].id == 4 && eqs[0].min == -6 && eqs[0].db == [3, 0, 0, 0, 0, -2])
     // Exactly the op-2 bytes that were sent to the buds and confirmed by read-back.
     precondition(customEQPayload(op: 2, id: 4, name: "Custom", db: [3, 0, 0, 0, 0, -2]) == [0x02] + Array(eqReply[3...]))
+    // Wear: real 0x8109 payload (both worn), and a live notification with both out.
+    precondition(parseWear([0x00, 0x03, 0x01, 0x07, 0x02, 0x07, 0x03, 0x04][2...]) == ["L": true, "R": true])
+    precondition(parseWear([0x02, 0x00, 0x01, 0x05, 0x02, 0x05, 0x03, 0x04][2...]) == ["L": false, "R": false])
+    let w = BudsLink()
+    feed2(w, [0xAA, 0x08, 0, 0, 0x04, 0x84, 0x01, 0x01, 0x00, 0x0E])          // SET rejected → notice
+    precondition(w.noiseNotice == notWornMessage)
+    feed2(w, [0xAA, 0x0C, 0, 0, 0x0C, 0x81, 0x02, 0x05, 0x00, 0x00, 0x01, 0x01, 0x08, 0x00])  // mode poll
+    precondition(w.noiseNotice == notWornMessage)                                 // must not flicker away
+    feed2(w, [0xAA, 0x0F, 0, 0, 0x09, 0x81, 0x03, 0x08, 0x00, 0x00, 0x03, 0x01, 0x07, 0x02, 0x07, 0x03, 0x04])
+    precondition(w.bothWorn == true && w.noiseNotice == nil)                      // worn → cleared
     print("selftest ok"); exit(0)
 }
 

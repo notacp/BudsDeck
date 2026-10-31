@@ -27,6 +27,7 @@ AA <len varint> 00 00 <cmd u16le> <seq u8> <paylen u16le> <payload>
 | `0x010C` | `04 01` | `00 04 01 <bitmap u16le>` | Strength the Adaptive mode is currently using |
 | `0x010C` | `02 01` | `00 02 01 <bitmap u16le>` | Supported top-level modes (`0x0006` on Buds 3) |
 | `0x0404` | `01 01 <bitmap u16le>` | `00` | Set noise mode. Returns status `0E` unless **both buds are worn** |
+| `0x0109` | none | `00 <n> (<idx> <flags>)×n` | Wear: idx 1 = L, 2 = R, 3 = case. flags `0x02` = in ear, `0x01` clear = in case |
 | `0x010F` | none | `00 <id>` | Current EQ (preset ID or custom slot ID) |
 | `0x0406` | `<id>` | `00` | Select EQ preset |
 | `0x0122` | none | see below | List custom EQ slots |
@@ -38,8 +39,10 @@ AA <len varint> 00 00 <cmd u16le> <seq u8> <paylen u16le> <payload>
 |---|---|
 | 0 / 1 / 2 | Shortcuts: setting them lands on bit 3 / 4 / 9 |
 | 3 | Off |
-| 4 | Adaptive ("Smart Scene"), the default noise-cancelling mode |
-| 5, 6, 7 | Mild / Moderate / Max. **Order inferred, not measured** |
+| 4 | Max |
+| 5 | Moderate |
+| 6 | Mild |
+| 7 | Adaptive ("Smart Scene"). `0x010C 04 01` reports which strength (bit 4–6) it is using |
 | 8 | Accepted, purpose unknown (transparency on other models) |
 | 9 | Transparency |
 
@@ -56,6 +59,10 @@ Each custom slot, both in the `0x0122` reply (after `00 <count>`) and in the `0x
 - Buds 3 uses 6 bands at 62 / 250 / 1000 / 4000 / 8000 / 16000 Hz, with a range of −6 to +6 dB.
 - `op`: `1` create (id 0), `2` save values and select, `3` delete.
 - On Buds 3, op 2 leaves a single custom slot in the list.
+
+Live wear changes arrive as notification `0x0204` with payload `02 ?? 01 <L> 02 <R> 03 <case>`. This layout comes from another implementation and has not yet been observed on Buds 3.
+
+The 4–7 order matches a Buds 4 / Buds Pro 3 implementation (`0x10` High, `0x20` Moderate, `0x40` Low, `0x80` Auto) and Buds 3 behaviour; it has not been confirmed by ear.
 
 ## Seen but not used by BudsDeck
 
