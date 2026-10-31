@@ -1,0 +1,74 @@
+# BudsDeck
+
+A Liquid Glass menu bar panel for **OnePlus, OPPO and realme earbuds** on macOS: noise control, EQ and battery, without a phone.
+
+```
+╭──────────────────────────────────╮
+│ 🎧 OnePlus Buds 3                 │
+│ ( L 100% ) ( R 100% )             │
+│   (⊘)        (●)        (👂)      │
+│   Off   Noise Cancelling  Transparency
+│ Level  [ Adaptive ⌃⌄ ]            │
+│ ▸ Equalizer              Balanced │
+╰──────────────────────────────────╯
+```
+
+These earbuds are normally configured through OnePlus's HeyMelody app on Android. BudsDeck speaks the same Bluetooth protocol directly from your Mac.
+
+## Features
+
+- **Noise control:** Off, Noise Cancelling and Transparency, plus ANC levels (Adaptive, Max, Moderate, Mild)
+- **Equalizer:** Balanced, Bold, Serenade and Bass presets, plus a 6-band custom EQ (62 Hz–16 kHz, ±6 dB) saved on the buds
+- **Battery** for each bud, with a charging indicator
+- Works for whichever HeyMelody earbuds are currently connected. Nothing is tied to a specific address.
+
+## Compatibility
+
+| Device | Status |
+|---|---|
+| OnePlus Buds 3 | Tested: noise modes, ANC levels, EQ presets, custom EQ, battery |
+| Other OnePlus / OPPO Enco / realme buds | Should connect (same protocol); mode bits and EQ presets can differ per model |
+
+Requires **macOS 26 or later on Apple Silicon**. Other people's reports for other models are welcome; open an issue.
+
+## Install
+
+There is no signed download yet, so build it from source. You need the Xcode Command Line Tools (`xcode-select --install`):
+
+```sh
+git clone https://github.com/notacp/BudsDeck.git
+cd BudsDeck
+./build.sh        # builds, runs a self-test, installs to ~/Applications
+open ~/Applications/BudsDeck.app
+```
+
+Allow Bluetooth access when macOS asks. To launch it automatically: System Settings → General → Login Items → **+** → BudsDeck.
+
+## Good to know
+
+- **Wear both buds to change noise modes.** The firmware rejects mode changes while the buds are out of your ears.
+- **One controller at a time.** The buds accept a single control connection. Quit BudsDeck before using another tool that talks to them.
+- **ANC level order is unverified.** Adaptive is confirmed. Which of the three remaining levels is Max versus Mild is inferred, not measured. If it sounds reversed, swap the labels in `ancVariants` in `BudsDeck.swift`.
+- **Saving a custom EQ merges the custom slots.** The buds keep one custom slot afterwards. Flat placeholder slots disappear; presets are not affected.
+- **Rebuilds and Bluetooth permission:** ad-hoc builds re-ask for Bluetooth permission after every rebuild. To avoid this, put your own signing identity in `local.env` (see `build.sh`).
+
+## How it works
+
+The buds expose a vendor serial service ("enco link", RFCOMM, UUID `0000079a-d102-11e1-9b23-00025b00a5a5`). BudsDeck opens it with IOBluetooth and sends small framed commands. The format is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+Everything is in one Swift file, [`BudsDeck.swift`](BudsDeck.swift): the protocol codec, the Bluetooth link and the SwiftUI panel.
+
+## Credits
+
+Prior open-source work on this protocol family:
+[omarchy-headphones `oppo-bridge`](https://github.com/ncr/omarchy-headphones) (Linux, frame format),
+[Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge) (OPPO Enco support),
+[OnePlus Buds Windows Companion](https://github.com/Thomaspatrick14/Oneplus-buds-Win-Companion) (EQ preset IDs).
+
+## Disclaimer
+
+BudsDeck is an independent project. It is not affiliated with, endorsed by or supported by OnePlus, OPPO or realme. Product names are trademarks of their owners and are used here only to describe compatibility. Commands are sent to your earbuds at your own risk. Everything BudsDeck changes can also be changed back in the official app.
+
+## License
+
+[MIT](LICENSE)
