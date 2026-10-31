@@ -348,11 +348,14 @@ struct BatteryPill: View {
                   : level > 60 ? "battery.100percent" : level > 25 ? "battery.50percent" : "battery.25percent")
                 .foregroundStyle(level <= 20 && !charging ? .red : .primary)
             Text("\(label) \(level)%").font(.caption.monospacedDigit())
+            if let updated {
+                Text("· last seen \(updated.formatted(.relative(presentation: .named, unitsStyle: .abbreviated)))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .padding(.horizontal, 10).padding(.vertical, 5)
         .glassEffect(.regular, in: .capsule)
-        .opacity(updated == nil ? 1 : 0.55)
-        .help(updated.map { "Last reported \($0.formatted(.relative(presentation: .named))). Open the case lid with the buds inside to refresh." } ?? "")
+        .help(updated == nil ? "" : "The buds report the case only while docked. Open the lid with the buds inside to refresh.")
     }
 }
 
@@ -473,13 +476,15 @@ struct Panel: View {
 
             if !link.battery.isEmpty {
                 GlassEffectContainer(spacing: 6) {
-                    HStack(spacing: 6) {
-                        ForEach(["L", "R", "Case"], id: \.self) { k in
-                            if let b = link.battery[k] {
-                                BatteryPill(label: k, level: b.level, charging: b.charging)
-                            } else if k == "Case", let c = link.lastCase {
-                                BatteryPill(label: k, level: c.level, charging: false, updated: c.at)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            ForEach(["L", "R", "Case"], id: \.self) { k in
+                                if let b = link.battery[k] { BatteryPill(label: k, level: b.level, charging: b.charging) }
                             }
+                        }
+                        // Case not in the live report: show the last reading on its own line (too wide for the row).
+                        if link.battery["Case"] == nil, let c = link.lastCase {
+                            BatteryPill(label: "Case", level: c.level, charging: false, updated: c.at)
                         }
                     }
                 }
