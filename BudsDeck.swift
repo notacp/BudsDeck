@@ -324,6 +324,61 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
 }
 
+// MARK: - Anonymous usage ping
+
+/// One `app_active` event per day (on days the buds connect) so the maintainer can count active installs.
+/// Sent: a random install ID (not derived from anything about the user or Mac), app version,
+/// macOS version, CPU architecture and the buds model name. Not sent: names, emails,
+/// Bluetooth addresses, listening data. IP addresses are discarded by the analytics project.
+/// Users can turn it off in the panel's settings menu.
+enum Telemetry {
+    static let host = "https://us.i.posthog.com"
+    /// PostHog project token: write-only, safe to ship in client code. Empty = disabled.
+    static let token = "phc_CgEzRxuLFuHTpnpjSeNU8u54PDffGwPX64YvPaG2Rktf"
+    static var store = UserDefaults.standard
+
+    static var enabled: Bool {
+        get { !store.bool(forKey: "telemetryOff") }
+        set { store.set(!newValue, forKey: "telemetryOff") }
+    }
+
+    static var installID: String {
+        if let id = store.string(forKey: "installID") { return id }
+        let id = UUID().uuidString
+        store.set(id, forKey: "installID")
+        return id
+    }
+
+    static func payload(budsModel: String?) -> [String: Any] {
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        var props: [String: Any] = [
+            "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev",
+            "os_version": "\(os.majorVersion).\(os.minorVersion)",
+            "arch": { var u = utsname(); uname(&u); return withUnsafeBytes(of: &u.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) } }(),
+            "$process_person_profile": false,   // no person profiles
+            "$geoip_disable": true,             // no location lookup
+        ]
+        if let budsModel { props["buds_model"] = budsModel }
+        return ["api_key": token, "event": "app_active", "distinct_id": installID, "properties": props]
+    }
+
+    /// Cheap to call often: sends at most once per UTC day, and only when enabled.
+    static func pingIfDue(budsModel: String?) {
+        guard enabled, !token.isEmpty else { return }
+        let day = ISO8601DateFormatter.string(from: Date(), timeZone: .gmt, formatOptions: [.withFullDate])
+        guard store.string(forKey: "lastPingDay") != day,
+              let body = try? JSONSerialization.data(withJSONObject: payload(budsModel: budsModel)) else { return }
+        var req = URLRequest(url: URL(string: host + "/i/v0/e/")!)
+        req.httpMethod = "POST"; req.httpBody = body
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        URLSession.shared.dataTask(with: req) { _, resp, _ in
+            if let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                DispatchQueue.main.async { store.set(day, forKey: "lastPingDay") }
+            }
+        }.resume()
+    }
+}
+
 // MARK: - Glass panel UI (macOS 26+ Liquid Glass)
 
 /// Bridges BudsLink's callbacks into SwiftUI.
@@ -343,7 +398,17 @@ final class BudsModel: ObservableObject {
         }
         // Defer the first refresh: publishing during @StateObject init is not allowed.
         DispatchQueue.main.async { [weak self] in self?.link.refresh() }
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.link.refresh() }
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.link.refresh()
+            // Once a day at most, and only on days the buds actually connect, so
+            // "active" means used with earbuds and the model is always known.
+            if let model = self?.link.device?.name { Telemetry.pingIfDue(budsModel: model) }
+        }
+    }
+
+    var shareUsage: Bool {
+        get { Telemetry.enabled }
+        set { Telemetry.enabled = newValue; objectWillChange.send() }
     }
 
     /// Bluetooth permission for this app (IOBluetooth is gated by the same TCC grant).
@@ -593,9 +658,17 @@ struct Panel: View {
             HStack {
                 Button("Refresh") { link.refresh() }
                 Spacer()
-                Toggle("Open at login", isOn: Binding(get: { model.openAtLogin }, set: { model.openAtLogin = $0 }))
-                    .toggleStyle(.checkbox)
-                Spacer()
+                Menu {
+                    Toggle("Open at Login", isOn: Binding(get: { model.openAtLogin }, set: { model.openAtLogin = $0 }))
+                    Toggle("Share Anonymous Usage Stats", isOn: Binding(get: { model.shareUsage }, set: { model.shareUsage = $0 }))
+                    Divider()
+                    Button("What's Shared…") {
+                        NSWorkspace.shared.open(URL(string: "https://github.com/notacp/BudsDeck#privacy")!)
+                    }
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 Button("Quit") { NSApp.terminate(nil) }
             }
             .buttonStyle(.borderless).font(.caption)
@@ -686,6 +759,14 @@ if CommandLine.arguments.contains("--selftest") {
                    CustomEQ(id: 6, name: "Mine", min: -6, max: 6, db: [2, 2, 2, 2, 2, 2])]
     e.eq = 6; precondition(e.selectedCustom?.name == "Mine")
     e.eq = 1; precondition(e.selectedCustom?.id == 4)   // preset active → first slot
+    // Telemetry payload carries only the documented, non-identifying fields.
+    Telemetry.store = UserDefaults(suiteName: "budsdeck.selftest")!
+    let tp = Telemetry.payload(budsModel: "OnePlus Buds 3")
+    let props = tp["properties"] as! [String: Any]
+    precondition(Set(props.keys) == ["app_version", "os_version", "arch", "buds_model", "$process_person_profile", "$geoip_disable"])
+    precondition(tp["event"] as? String == "app_active" && UUID(uuidString: tp["distinct_id"] as! String) != nil)
+    precondition(props["$process_person_profile"] as? Bool == false)
+    Telemetry.enabled = false; precondition(!Telemetry.enabled)
     l.store.removePersistentDomain(forName: "budsdeck.selftest")
     print("selftest ok"); exit(0)
 }

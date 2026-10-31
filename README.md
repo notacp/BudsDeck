@@ -71,6 +71,18 @@ To update, `git pull` and run `./build.sh` again; it restarts the app. `./build.
 - **Custom EQ edits the selected slot.** If you made custom EQs in HeyMelody, BudsDeck edits whichever one is active. Unnamed flat "Custom" placeholder slots may merge into one; named slots are kept.
 - **Rebuilds and Bluetooth permission:** ad-hoc builds re-ask for Bluetooth permission after every rebuild. To avoid this, put your own signing identity in `local.env` (see `build.sh`).
 
+## Privacy
+
+On days your earbuds connect, BudsDeck sends one anonymous `app_active` ping so the maintainer can see roughly how many people use it, with which versions and which earbud models. That's it.
+
+| Sent | Not sent |
+|---|---|
+| A random install ID created on first launch | Your name, email or Apple ID |
+| App version, macOS version, Apple Silicon or Intel | Your IP address (discarded by the analytics project) |
+| The earbuds' model name, e.g. "OnePlus Buds 3" | Bluetooth addresses, settings, listening activity |
+
+Turn it off any time: gear menu in the panel → **Share Anonymous Usage Stats**. The code is in `Telemetry` in [`BudsDeck.swift`](BudsDeck.swift).
+
 ## How it works
 
 The buds expose a vendor serial service ("enco link", RFCOMM, UUID `0000079a-d102-11e1-9b23-00025b00a5a5`). BudsDeck opens it with IOBluetooth and sends small framed commands. The format is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
