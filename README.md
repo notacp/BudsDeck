@@ -19,7 +19,7 @@ These earbuds are normally configured through OnePlus's HeyMelody app on Android
 
 - **Noise control:** Off, Noise Cancelling and Transparency, plus ANC levels (Adaptive, Max, Moderate, Mild)
 - **Equalizer:** Balanced, Bold, Serenade and Bass presets, plus a 6-band custom EQ (62 Hz–16 kHz, ±6 dB) saved on the buds
-- **Battery** for each bud, with a charging indicator
+- **Battery** for each bud and the case, with a charging indicator. The buds report the case only while docked or just after the lid opens, so BudsDeck shows the last case reading, dimmed, until a fresh one arrives
 - Works for whichever HeyMelody earbuds are currently connected. Nothing is tied to a specific address.
 
 ## Compatibility

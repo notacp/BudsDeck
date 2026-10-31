@@ -141,6 +141,12 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
     var mode: Int?               // current bit index
     var eq: Int?                 // current EQ id (preset 0–3, or a custom slot id)
     var customEQs: [CustomEQ] = []
+    /// The buds only report the case while docked / lid recently open, so keep the last reading.
+    var store = UserDefaults.standard
+    var lastCase: (level: Int, charging: Bool, at: Date)? {
+        guard let at = store.object(forKey: "caseAt") as? Date else { return nil }
+        return (store.integer(forKey: "caseLevel"), store.bool(forKey: "caseCharging"), at)
+    }
     var lastError: String?       // connection problems
     var noiseNotice: String?     // why the last noise-mode change didn't happen
     var inEar: [String: Bool] = [:]
@@ -240,10 +246,15 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
         switch cmd {
         case Cmd.battery.rawValue | 0x8000 where p.count >= 2 && p[0] == 0:
             let names = [1: "L", 2: "R", 3: "Case"]
+            battery = [:]   // drop entries the buds no longer report (e.g. the case)
             var i = 2
             while i + 1 < p.count, i < 2 + Int(p[1]) * 2 {
-                if let n = names[Int(p[i])] { battery[n] = (Int(p[i + 1] & 0x7F), p[i + 1] & 0x80 != 0) }
+                if let n = names[Int(p[i])], p[i + 1] != 0xFF { battery[n] = (Int(p[i + 1] & 0x7F), p[i + 1] & 0x80 != 0) }
                 i += 2
+            }
+            if let c = battery["Case"] {
+                store.set(c.level, forKey: "caseLevel"); store.set(c.charging, forKey: "caseCharging")
+                store.set(Date(), forKey: "caseAt")
             }
         case Cmd.noiseGet.rawValue | 0x8000 where p.count >= 4 && p[0] == 0 && p[2] == 0x01:
             let bits = p[3...].enumerated().reduce(0) { $0 | Int($1.element) << ($1.offset * 8) }
@@ -330,6 +341,7 @@ struct ModeButton: View {
 
 struct BatteryPill: View {
     let label: String, level: Int, charging: Bool
+    var updated: Date? = nil   // set for a remembered (not live) reading
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: charging ? "battery.100percent.bolt"
@@ -339,6 +351,8 @@ struct BatteryPill: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 5)
         .glassEffect(.regular, in: .capsule)
+        .opacity(updated == nil ? 1 : 0.55)
+        .help(updated.map { "Last reported \($0.formatted(.relative(presentation: .named))). Open the case lid with the buds inside to refresh." } ?? "")
     }
 }
 
@@ -461,7 +475,11 @@ struct Panel: View {
                 GlassEffectContainer(spacing: 6) {
                     HStack(spacing: 6) {
                         ForEach(["L", "R", "Case"], id: \.self) { k in
-                            if let b = link.battery[k] { BatteryPill(label: k, level: b.level, charging: b.charging) }
+                            if let b = link.battery[k] {
+                                BatteryPill(label: k, level: b.level, charging: b.charging)
+                            } else if k == "Case", let c = link.lastCase {
+                                BatteryPill(label: k, level: c.level, charging: false, updated: c.at)
+                            }
                         }
                     }
                 }
@@ -537,6 +555,8 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(fs.count == 2 && fs[0].cmd == 0x8106 && fs[1].payload == [0, 1, 1, 0x00, 0x02])
     precondition(buf == [0xAA, 0x0C])  // partial tail kept
     let l = BudsLink()
+    l.store = UserDefaults(suiteName: "budsdeck.selftest")!
+    l.store.removePersistentDomain(forName: "budsdeck.selftest")
     func feed(_ bytes: [UInt8]) { var b = bytes; b.withUnsafeMutableBytes { l.rfcommChannelData(nil, data: $0.baseAddress, length: $0.count) } }
     feed([0xAA, 0x0F, 0, 0, 0x06, 0x81, 0x01, 0x08, 0x00, 0x00, 0x03, 0x01, 0xE4, 0x02, 0x64, 0x03, 0x28])
     precondition(l.battery["L"]! == (100, true) && l.battery["Case"]!.level == 40)
@@ -558,6 +578,10 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(w.noiseNotice == notWornMessage)                                 // must not flicker away
     feed2(w, [0xAA, 0x0F, 0, 0, 0x09, 0x81, 0x03, 0x08, 0x00, 0x00, 0x03, 0x01, 0x07, 0x02, 0x07, 0x03, 0x04])
     precondition(w.bothWorn == true && w.noiseNotice == nil)                      // worn → cleared
+    // Case battery: live reading is remembered; a later report without the case keeps it as lastCase.
+    feed2(l, [0xAA, 0x0D, 0, 0, 0x06, 0x81, 0x09, 0x06, 0x00, 0x00, 0x02, 0x01, 0x5A, 0x02, 0x5A])  // real: L 90, R 90
+    precondition(l.battery["Case"] == nil && l.battery["L"]!.level == 90 && l.lastCase?.level == 40)
+    l.store.removePersistentDomain(forName: "budsdeck.selftest")
     print("selftest ok"); exit(0)
 }
 
