@@ -41,6 +41,12 @@ Requires **macOS 26 or later** (Apple Silicon or Intel). Reports for other model
 2. Go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to BudsDeck, then confirm with your password.
 3. Allow **Bluetooth** access when asked.
 
+Prefer Terminal? After dragging BudsDeck to Applications, this does the same as steps 1–2 by removing the download quarantine flag:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/BudsDeck.app
+```
+
 You only do this once. Tick **Open at login** in the panel to start it automatically.
 
 ### Build from source
