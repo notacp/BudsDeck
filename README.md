@@ -29,11 +29,23 @@ These earbuds are normally configured through OnePlus's HeyMelody app on Android
 | OnePlus Buds 3 | Tested: noise modes, ANC levels, EQ presets, custom EQ, battery |
 | Other OnePlus / OPPO Enco / realme buds | Should connect (same protocol); mode bits and EQ presets can differ per model |
 
-Requires **macOS 26 or later on an Apple Silicon Mac**, plus the **Xcode 26 command-line tools** to build (older tools lack the Liquid Glass APIs). Reports for other models are welcome; open an issue.
+Requires **macOS 26 or later** (Apple Silicon or Intel). Reports for other models are welcome; open an issue.
 
 ## Install
 
-There is no signed download yet, so build it from source. You need the Xcode Command Line Tools (`xcode-select --install`):
+**Download:** [BudsDeck.dmg](https://github.com/notacp/BudsDeck/releases/latest/download/BudsDeck.dmg) (500 KB, Apple Silicon and Intel). Open it and drag **BudsDeck** into **Applications**.
+
+**First launch:** BudsDeck isn't notarized by Apple yet, so macOS blocks it the first time:
+
+1. Open BudsDeck from Applications. macOS says it "could not verify" the app; click **Done**.
+2. Go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to BudsDeck, then confirm with your password.
+3. Allow **Bluetooth** access when asked.
+
+You only do this once. Tick **Open at login** in the panel to start it automatically.
+
+### Build from source
+
+You need the **Xcode 26 command-line tools** (`xcode-select --install`); older tools lack the Liquid Glass APIs.
 
 ```sh
 git clone https://github.com/notacp/BudsDeck.git
@@ -42,7 +54,7 @@ cd BudsDeck
 open ~/Applications/BudsDeck.app
 ```
 
-Allow Bluetooth access when macOS asks. Tick **Open at login** in the panel to start it automatically. To update, `git pull` and run `./build.sh` again; it restarts the app.
+To update, `git pull` and run `./build.sh` again; it restarts the app. `./build.sh --dmg` makes the release DMG.
 
 ## Good to know
 

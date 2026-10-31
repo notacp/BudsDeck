@@ -1,5 +1,7 @@
 #!/bin/sh
 # Builds BudsDeck.app (menu bar only), runs its self-test, installs to ~/Applications.
+#   ./build.sh         build + install (+ restart if running)
+#   ./build.sh --dmg   build a universal, ad-hoc-signed dist/BudsDeck.dmg for a release
 #
 # Signing: defaults to ad-hoc ("-"). macOS then re-asks for Bluetooth permission
 # after every rebuild, because each ad-hoc build looks like a new app. To keep
@@ -7,10 +9,16 @@
 #   SIGN_ID="Apple Development: you@example.com (XXXXXXXXXX)"
 set -e
 cd "$(dirname "$0")"
-[ -f local.env ] && . ./local.env
+DMG=0; [ "$1" = "--dmg" ] && DMG=1
+# Releases are always ad-hoc: a personal "Apple Development" identity is useless to others.
+[ "$DMG" = 0 ] && [ -f local.env ] && . ./local.env
 APP=build/BudsDeck.app
 rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS"
-swiftc -O -swift-version 5 -target arm64-apple-macos26.0 BudsDeck.swift -o "$APP/Contents/MacOS/BudsDeck"
+# Universal: Apple Silicon + Intel (macOS 26 still supports some Intel Macs).
+for arch in arm64 x86_64; do
+  swiftc -O -swift-version 5 -target $arch-apple-macos26.0 BudsDeck.swift -o build/BudsDeck-$arch
+done
+lipo -create build/BudsDeck-arm64 build/BudsDeck-x86_64 -output "$APP/Contents/MacOS/BudsDeck"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -27,6 +35,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 codesign --force --sign "${SIGN_ID:--}" "$APP"
 "$APP/Contents/MacOS/BudsDeck" --selftest
+
+if [ "$DMG" = 1 ]; then
+  rm -rf build/dmg dist && mkdir -p build/dmg dist
+  cp -R "$APP" build/dmg/ && ln -s /Applications build/dmg/Applications
+  hdiutil create -quiet -volname BudsDeck -srcfolder build/dmg -ov -format UDZO dist/BudsDeck.dmg
+  shasum -a 256 dist/BudsDeck.dmg
+  exit 0
+fi
 # Quit a running copy first, otherwise `open` just re-activates the old version.
 WAS_RUNNING=0; pkill -x BudsDeck && WAS_RUNNING=1 && sleep 1
 mkdir -p ~/Applications && rm -rf ~/Applications/BudsDeck.app && cp -R "$APP" ~/Applications/
