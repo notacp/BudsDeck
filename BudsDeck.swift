@@ -349,6 +349,25 @@ enum Telemetry {
         return id
     }
 
+    /// Known model names. The Bluetooth name is user-editable ("Alex's OnePlus Buds 3"),
+    /// so it is never sent as-is: only a canonical name from this list, or "other".
+    /// Longer names first so "Buds Pro 3" wins over "Buds 3".
+    static let knownModels = [
+        "OnePlus Nord Buds 3 Pro", "OnePlus Nord Buds 3r", "OnePlus Nord Buds 3", "OnePlus Nord Buds 2r",
+        "OnePlus Nord Buds 2", "OnePlus Nord Buds", "OnePlus Buds Pro 3", "OnePlus Buds Pro 2R",
+        "OnePlus Buds Pro 2", "OnePlus Buds Pro", "OnePlus Buds Z2", "OnePlus Buds Z", "OnePlus Buds 4",
+        "OnePlus Buds 3", "OnePlus Buds", "OPPO Enco X3", "OPPO Enco X2", "OPPO Enco X", "OPPO Enco Air4 Pro",
+        "OPPO Enco Air4", "OPPO Enco Air3 Pro", "OPPO Enco Air3", "OPPO Enco Air2 Pro", "OPPO Enco Air2",
+        "OPPO Enco Air", "OPPO Enco Buds3 Pro", "OPPO Enco Buds3", "OPPO Enco Buds2 Pro", "OPPO Enco Buds2",
+        "OPPO Enco Free3", "OPPO Enco Free2", "realme Buds Air 7 Pro", "realme Buds Air 7", "realme Buds Air 6 Pro",
+        "realme Buds Air 6", "realme Buds Air 5 Pro", "realme Buds Air 5", "realme Buds T310", "realme Buds T300",
+    ]
+
+    static func modelName(_ bluetoothName: String) -> String {
+        let n = bluetoothName.lowercased()
+        return knownModels.first { n.contains($0.lowercased()) } ?? "other"
+    }
+
     static func payload(budsModel: String?) -> [String: Any] {
         let os = ProcessInfo.processInfo.operatingSystemVersion
         var props: [String: Any] = [
@@ -358,7 +377,7 @@ enum Telemetry {
             "$process_person_profile": false,   // no person profiles
             "$geoip_disable": true,             // no location lookup
         ]
-        if let budsModel { props["buds_model"] = budsModel }
+        if let budsModel { props["buds_model"] = modelName(budsModel) }
         return ["api_key": token, "event": "app_active", "distinct_id": installID, "properties": props]
     }
 
@@ -766,6 +785,11 @@ if CommandLine.arguments.contains("--selftest") {
     precondition(Set(props.keys) == ["app_version", "os_version", "arch", "buds_model", "$process_person_profile", "$geoip_disable"])
     precondition(tp["event"] as? String == "app_active" && UUID(uuidString: tp["distinct_id"] as! String) != nil)
     precondition(props["$process_person_profile"] as? Bool == false)
+    // A renamed device never leaks the user's chosen name.
+    precondition(Telemetry.modelName("Pradyumn’s OnePlus Buds 3") == "OnePlus Buds 3")
+    precondition(Telemetry.modelName("OnePlus Buds Pro 3") == "OnePlus Buds Pro 3")
+    precondition(Telemetry.modelName("Alex's earbuds") == "other")
+    precondition((Telemetry.payload(budsModel: "Sam's Nord Buds")["properties"] as! [String: Any])["buds_model"] as? String == "other")
     Telemetry.enabled = false; precondition(!Telemetry.enabled)
     l.store.removePersistentDomain(forName: "budsdeck.selftest")
     print("selftest ok"); exit(0)

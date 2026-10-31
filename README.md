@@ -79,7 +79,7 @@ On days your earbuds connect, BudsDeck sends one anonymous `app_active` ping so 
 |---|---|
 | A random install ID created on first launch | Your name, email or Apple ID |
 | App version, macOS version, Apple Silicon or Intel | Your IP address (discarded by the analytics project) |
-| The earbuds' model name, e.g. "OnePlus Buds 3" | Bluetooth addresses, settings, listening activity |
+| The earbuds' model, e.g. "OnePlus Buds 3", picked from a fixed list of known models (otherwise "other") | Your earbuds' Bluetooth name if you renamed them, Bluetooth addresses, settings, listening activity |
 
 Turn it off any time: gear menu in the panel → **Share Anonymous Usage Stats**. The code is in `Telemetry` in [`BudsDeck.swift`](BudsDeck.swift).
 
