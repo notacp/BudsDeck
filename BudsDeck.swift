@@ -341,21 +341,15 @@ struct ModeButton: View {
 
 struct BatteryPill: View {
     let label: String, level: Int, charging: Bool
-    var updated: Date? = nil   // set for a remembered (not live) reading
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: charging ? "battery.100percent.bolt"
                   : level > 60 ? "battery.100percent" : level > 25 ? "battery.50percent" : "battery.25percent")
                 .foregroundStyle(level <= 20 && !charging ? .red : .primary)
             Text("\(label) \(level)%").font(.caption.monospacedDigit())
-            if let updated {
-                Text("· last seen \(updated.formatted(.relative(presentation: .named, unitsStyle: .abbreviated)))")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
         }
-        .padding(.horizontal, 10).padding(.vertical, 5)
+        .padding(.horizontal, 8).padding(.vertical, 5)
         .glassEffect(.regular, in: .capsule)
-        .help(updated == nil ? "" : "The buds report the case only while docked. Open the lid with the buds inside to refresh.")
     }
 }
 
@@ -476,15 +470,13 @@ struct Panel: View {
 
             if !link.battery.isEmpty {
                 GlassEffectContainer(spacing: 6) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 6) {
-                            ForEach(["L", "R", "Case"], id: \.self) { k in
-                                if let b = link.battery[k] { BatteryPill(label: k, level: b.level, charging: b.charging) }
-                            }
+                    HStack(spacing: 6) {
+                        ForEach(["L", "R"], id: \.self) { k in
+                            if let b = link.battery[k] { BatteryPill(label: k, level: b.level, charging: b.charging) }
                         }
-                        // Case not in the live report: show the last reading on its own line (too wide for the row).
-                        if link.battery["Case"] == nil, let c = link.lastCase {
-                            BatteryPill(label: "Case", level: c.level, charging: false, updated: c.at)
+                        // Live when docked; otherwise the most recent reading (the buds stop reporting the case).
+                        if let c = link.battery["Case"] ?? link.lastCase.map({ ($0.level, $0.charging) }) {
+                            BatteryPill(label: "Case", level: c.level, charging: c.charging)
                         }
                     }
                 }
@@ -527,7 +519,7 @@ struct Panel: View {
             .buttonStyle(.borderless).font(.caption)
         }
         .padding(16)
-        .frame(width: 300)
+        .frame(width: 320)
         .animation(.snappy, value: link.noiseNotice)
         .animation(.snappy, value: link.bothWorn)
         // Refresh each time the panel window comes forward.
