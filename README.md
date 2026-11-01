@@ -5,7 +5,7 @@
 <h1 align="center">BudsDeck</h1>
 
 <p align="center">
-  <b>Your OnePlus, OPPO and realme earbuds, controlled from the Mac menu bar.</b><br>
+  <b>Your OnePlus and OPPO earbuds, controlled from the Mac menu bar.</b><br>
   Noise cancelling, EQ and battery without a phone or the HeyMelody app.
 </p>
 
@@ -53,7 +53,10 @@ Requires **macOS 26 or later**, on Apple Silicon or Intel.
 | Earbuds | Status |
 |---|---|
 | OnePlus Buds 3 | ✅ Tested: noise modes, ANC levels, EQ presets, custom EQ, battery |
-| Other OnePlus, OPPO Enco and realme buds | Should connect (same protocol). Mode bits and EQ presets can differ per model |
+| OnePlus Buds Pro 2 / 2R / 3, OPPO Enco X3 / X3s / X3i | Expected to work fully. Simulated against the official app's model data, not yet tested on real earbuds |
+| OnePlus Buds 4, Buds Pro 4, Buds Ace 3, Nord Buds 3 Pro / 4 / 4 Pro, OPPO Enco X2 / X4 / Free3 / Free4 / Air3 Pro / Air4 Pro / Air5 / Air5 Pro / R3 Pro | Noise control expected to work. Some EQ presets may be missing or named differently |
+| Older models (OnePlus Buds Pro, Buds Z / Z2, Nord Buds / Nord Buds 2, OPPO Enco Free / W51 and others) | Not detected yet: they use a different control channel |
+| realme | Not supported: realme earbuds use their own app |
 
 Using it with other earbuds? [Open an issue](https://github.com/notacp/BudsDeck/issues/new) with what works, or use **Report a Problem…** in the app.
 
@@ -152,7 +155,7 @@ Prior open-source work on this protocol family:
 
 ## Disclaimer
 
-BudsDeck is an independent project. It is not affiliated with, endorsed by or supported by OnePlus, OPPO or realme. Product names are trademarks of their owners and are used here only to describe compatibility. Commands are sent to your earbuds at your own risk; everything BudsDeck changes can also be changed back in the official app.
+BudsDeck is an independent project. It is not affiliated with, endorsed by or supported by OnePlus or OPPO. Product names are trademarks of their owners and are used here only to describe compatibility. Commands are sent to your earbuds at your own risk; everything BudsDeck changes can also be changed back in the official app.
 
 ## License
 

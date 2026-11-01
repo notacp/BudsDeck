@@ -1,4 +1,4 @@
-// BudsDeck — menu bar control for OnePlus / OPPO / realme earbuds that speak the
+// BudsDeck — menu bar control for OnePlus / OPPO earbuds that speak the
 // HeyMelody ("enco link") protocol over Bluetooth Classic RFCOMM.
 //
 // Frame:  AA <len varint> 00 00 <cmd u16le> <seq u8> <paylen u16le> <payload>
@@ -13,13 +13,16 @@ import ServiceManagement
 // MARK: - Noise modes (bit index in the 0x0404 / 0x010C bitmap)
 
 let modeOff = 3
-let modeTransparency = 9
+/// Bit 8 is Transparency in HeyMelody's model list for every model. Buds 3 also reports bit 9
+/// after the on-bud gesture, and 9 sounds the same by ear (tested 2026-11-01); on OPPO Enco
+/// X2/X3, 9 is "vocal" transparency. Send 8; read 9 back as Transparency.
+let modeTransparency = 8
 
 /// Noise-cancelling levels. Naming: one automatic mode called "Adaptive" (Apple / Samsung /
 /// Nothing; OnePlus says "Smart Scene") plus OnePlus's Max / Moderate / Mild ladder.
 /// Bit order matches a hands-on Buds 4 / Buds Pro 3 implementation (0x10 High, 0x20 Moderate,
 /// 0x40 Low, 0x80 Auto) and our own data: Smart's auto-pick (0x010C type 4) reported bits 5
-/// and 6, i.e. strengths, never 7. Bit 8 is accepted but left out (transparency on siblings).
+/// and 6, i.e. strengths, never 7.
 let ancVariants: [(bit: Int, label: String)] = [
     (7, "Adaptive"),
     (4, "Max"),
@@ -314,7 +317,7 @@ final class BudsLink: NSObject, IOBluetoothRFCOMMChannelDelegate {
             }
         case Cmd.noiseGet.rawValue | 0x8000 where p.count >= 4 && p[0] == 0 && p[2] == 0x01:
             let bits = p[3...].enumerated().reduce(0) { $0 | Int($1.element) << ($1.offset * 8) }
-            mode = (0..<16).first { bits & (1 << $0) != 0 }
+            mode = (0..<16).first { bits & (1 << $0) != 0 }.map { $0 == 9 ? modeTransparency : $0 }
         case Cmd.noiseSet.rawValue | 0x8000:
             // 0x0E = buds refuse while not worn (observed on Buds 3).
             switch p.first {
@@ -811,7 +814,7 @@ struct Panel: View {
                 Image(systemName: "earbuds").font(.title2)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(link.device?.name ?? "No buds connected").font(.headline)
-                    Text(!connected ? "OnePlus, OPPO or realme earbuds"
+                    Text(!connected ? "OnePlus or OPPO earbuds"
                          : link.anyWorn == false ? "Not in your ears" : "Listening Mode")
                         .font(.caption).foregroundStyle(.secondary)
                         .lineLimit(2).fixedSize(horizontal: false, vertical: true)

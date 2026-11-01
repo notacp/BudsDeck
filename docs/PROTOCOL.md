@@ -38,14 +38,14 @@ AA <len varint> 00 00 <cmd u16le> <seq u8> <paylen u16le> <payload>
 
 | Bit | Mode |
 |---|---|
-| 0 / 1 / 2 | Shortcuts: setting them lands on bit 3 / 4 / 9 |
+| 0 / 1 / 2 | Groups (Off / ANC / Transparency): setting one lands on a member, e.g. 3 / 4 / 9 |
 | 3 | Off |
 | 4 | Max |
 | 5 | Moderate |
 | 6 | Mild |
 | 7 | Adaptive ("Smart Scene"). `0x010C 04 01` reports which strength (bit 4–6) it is using |
-| 8 | Accepted, purpose unknown (transparency on other models) |
-| 9 | Transparency |
+| 8 | Transparency (HeyMelody's model list uses 8 for every model) |
+| 9 | Also transparency on Buds 3: reported after the on-bud gesture, sounds the same as 8 (ear-tested). On OPPO Enco X2 / X3 it is "vocal" transparency |
 
 ### EQ
 
